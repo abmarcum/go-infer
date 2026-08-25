@@ -60,7 +60,7 @@ go-infer/
 │   ├── metal/                    # Apple Metal GPU compute backend
 │   │   ├── kernels.metal         # MSL compute shaders (8-way SIMD, fused Gate-Up)
 │   │   ├── metal_bridge.h        # CGo bridging interface
-│   │   ├── metal_bridge.m        # Objective-C Metal pipeline orchestrator
+│   │   ├── metal_bridge_darwin.m # Objective-C Metal pipeline orchestrator
 │   │   ├── metal_darwin.go       # Darwin CGo bindings & layer weight handles
 │   │   ├── metal_fallback.go     # Cross-platform fallback stubs
 │   │   └── metal_test.go         # GPU kernel unit tests & benchmarks

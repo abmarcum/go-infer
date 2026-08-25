@@ -28,6 +28,19 @@ jobs:
           go-version-file: 'go.mod'
           check-latest: true
 
+      - name: Compile Metal Shaders (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          if command -v xcrun >/dev/null 2>&1; then
+            echo "Compiling Metal kernels..."
+            xcrun -sdk macosx metal -O3 -c pkg/metal/kernels.metal -o pkg/metal/kernels.air
+            xcrun -sdk macosx metallib pkg/metal/kernels.air -o pkg/metal/kernels.metallib
+            rm -f pkg/metal/kernels.air
+          fi
+
+      - name: Run Go Vet
+        run: go vet ./...
+
       - name: Run Tests
         run: go test -v -race ./...
         if: matrix.os != 'windows-latest'

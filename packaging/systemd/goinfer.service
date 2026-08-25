@@ -1,0 +1,26 @@
+[Unit]
+Description=GoInfer High-Performance LLM Inference Server
+Documentation=https://github.com/your-username/goinfer
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=goinfer
+Group=goinfer
+EnvironmentFile=-/etc/goinfer/goinfer.conf
+ExecStart=/usr/bin/goinfer --serve ${GOINFER_LISTEN_ADDR} --kv-type ${GOINFER_KV_TYPE} --cors-origin "${GOINFER_CORS_ORIGIN}" ${GOINFER_EXTRA_ARGS} ${GOINFER_MODEL_PATH}
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+
+# Security Sandboxing
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

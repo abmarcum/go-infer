@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+
+# Create goinfer system user & group if they do not exist
+if ! getent group goinfer >/dev/null; then
+    addgroup --system goinfer >/dev/null 2>&1 || groupadd -r goinfer >/dev/null 2>&1 || true
+fi
+
+if ! getent passwd goinfer >/dev/null; then
+    adduser --system --ingroup goinfer --no-create-home --home /var/lib/goinfer goinfer >/dev/null 2>&1 || \
+    useradd -r -g goinfer -d /var/lib/goinfer -s /sbin/nologin goinfer >/dev/null 2>&1 || true
+fi
+
+# Set directory permissions
+mkdir -p /etc/goinfer /var/lib/goinfer/models /var/log/goinfer
+chown -R goinfer:goinfer /var/lib/goinfer /var/log/goinfer
+chmod 755 /etc/goinfer /var/lib/goinfer /var/log/goinfer
+
+# Reload systemd and enable service
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable goinfer.service >/dev/null 2>&1 || true
+fi
+
+echo "GoInfer installed successfully!"
+echo "Place your model at /var/lib/goinfer/models/default.gguf or configure /etc/goinfer/goinfer.conf"
+echo "Start the service with: sudo systemctl start goinfer"

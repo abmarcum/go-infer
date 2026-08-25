@@ -1,0 +1,58 @@
+# Compiled Binaries & Executables
+/go-infer
+/go-infer.exe
+/goinfer
+/goinfer.exe
+/go-inference
+/go-inference.exe
+/bench
+/bench.exe
+/quantize
+/quantize.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build, Packaging, and Distribution Artifacts
+bin/
+dist/
+build/
+
+# Apple Metal Intermediate & Compiled Artifacts
+pkg/metal/kernels.air
+pkg/metal/kernels.metallib
+
+# Test & Coverage Outputs
+*.test
+*.out
+coverage.txt
+coverage.html
+profile.pprof
+*.prof
+
+# Operating System Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE & Editor Directories
+.idea/
+.vscode/
+*.swp
+*~
+*.bak
+
+# Models & Weight Checkpoints (GGUF, safetensors, blobs)
+*.gguf
+*.bin
+*.safetensors
+models/
+
+# Log Files
+*.log

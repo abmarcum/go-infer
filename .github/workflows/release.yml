@@ -1,0 +1,266 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (e.g. v1.0.0)'
+        required: false
+        default: ''
+      draft:
+        description: 'Publish as draft'
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Publish as pre-release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-binaries:
+    name: Build Binary (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo: "0"
+            ext: ""
+            archive_format: tar.gz
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cgo: "0"
+            ext: ""
+            archive_format: tar.gz
+          # Apple macOS builds (Apple Silicon with native Metal CGO, Intel x86_64)
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            cgo: "1"
+            ext: ""
+            archive_format: tar.gz
+          - os: macos-13
+            goos: darwin
+            goarch: amd64
+            cgo: "0"
+            ext: ""
+            archive_format: tar.gz
+          # Windows builds
+          - os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            cgo: "0"
+            ext: ".exe"
+            archive_format: zip
+          - os: ubuntu-latest
+            goos: windows
+            goarch: arm64
+            cgo: "0"
+            ext: ".exe"
+            archive_format: zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Resolve Version
+        id: vars
+        shell: bash
+        run: |
+          RAW_REF="${{ github.event.inputs.tag_name }}"
+          if [ -z "$RAW_REF" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            RAW_REF="${{ github.ref_name }}"
+          fi
+          if [ -z "$RAW_REF" ]; then
+            RAW_REF="v$(cat VERSION 2>/dev/null || echo '1.0.0')"
+          fi
+          echo "tag=${RAW_REF}" >> $GITHUB_OUTPUT
+          CLEAN_VER="${RAW_REF#v}"
+          echo "version=${CLEAN_VER}" >> $GITHUB_OUTPUT
+
+      - name: Compile Metal Shaders (macOS)
+        if: matrix.goos == 'darwin' && matrix.cgo == '1'
+        run: |
+          if command -v xcrun >/dev/null 2>&1; then
+            echo "Compiling Metal kernels..."
+            xcrun -sdk macosx metal -O3 -c pkg/metal/kernels.metal -o pkg/metal/kernels.air
+            xcrun -sdk macosx metallib pkg/metal/kernels.air -o pkg/metal/kernels.metallib
+            rm -f pkg/metal/kernels.air
+          fi
+
+      - name: Build Binaries
+        shell: bash
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p build_stage
+          LDFLAGS="-s -w -X main.version=${{ steps.vars.outputs.tag }}"
+          
+          echo "Building go-infer (${{ matrix.goos }}/${{ matrix.goarch }})..."
+          go build -ldflags="${LDFLAGS}" -o "build_stage/go-infer${{ matrix.ext }}" .
+          
+          # Alias/symlink name goinfer
+          cp "build_stage/go-infer${{ matrix.ext }}" "build_stage/goinfer${{ matrix.ext }}"
+
+          echo "Building bench..."
+          go build -ldflags="${LDFLAGS}" -o "build_stage/bench${{ matrix.ext }}" ./cmd/bench
+
+          echo "Building quantize..."
+          go build -ldflags="${LDFLAGS}" -o "build_stage/quantize${{ matrix.ext }}" ./cmd/quantize
+
+      - name: Package Archive
+        shell: bash
+        run: |
+          PKG_NAME="go-inference_${{ steps.vars.outputs.tag }}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          mkdir -p "dist"
+          mkdir -p "${PKG_NAME}"
+
+          cp build_stage/* "${PKG_NAME}/"
+          cp README.md "${PKG_NAME}/"
+          if [ -f "packaging/default/goinfer.conf" ]; then
+            cp packaging/default/goinfer.conf "${PKG_NAME}/"
+          fi
+
+          if [ "${{ matrix.archive_format }}" = "zip" ]; then
+            if command -v zip >/dev/null 2>&1; then
+              zip -r "dist/${PKG_NAME}.zip" "${PKG_NAME}"
+            else
+              python3 -c "import shutil; shutil.make_archive('dist/${PKG_NAME}', 'zip', '.', '${PKG_NAME}')"
+            fi
+          else
+            tar -czf "dist/${PKG_NAME}.tar.gz" "${PKG_NAME}"
+          fi
+
+      - name: Upload Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          retention-days: 2
+
+  build-linux-packages:
+    name: Build Linux Packages (.deb / .rpm)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Install Packaging Tools (RPM & DPKG)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm dpkg-dev
+
+      - name: Resolve Version
+        id: vars
+        shell: bash
+        run: |
+          RAW_REF="${{ github.event.inputs.tag_name }}"
+          if [ -z "$RAW_REF" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            RAW_REF="${{ github.ref_name }}"
+          fi
+          if [ -z "$RAW_REF" ]; then
+            RAW_REF="v$(cat VERSION 2>/dev/null || echo '1.0.0')"
+          fi
+          echo "tag=${RAW_REF}" >> $GITHUB_OUTPUT
+          CLEAN_VER="${RAW_REF#v}"
+          echo "version=${CLEAN_VER}" >> $GITHUB_OUTPUT
+
+      - name: Build .deb and .rpm Packages
+        run: |
+          go run ./cmd/package -version "${{ steps.vars.outputs.version }}" -out dist/packages
+
+      - name: Upload Linux Package Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            dist/packages/*.deb
+            dist/packages/*.rpm
+          retention-days: 2
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-binaries, build-linux-packages]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Version
+        id: vars
+        shell: bash
+        run: |
+          RAW_REF="${{ github.event.inputs.tag_name }}"
+          if [ -z "$RAW_REF" ] && [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            RAW_REF="${{ github.ref_name }}"
+          fi
+          if [ -z "$RAW_REF" ]; then
+            RAW_REF="v$(cat VERSION 2>/dev/null || echo '1.0.0')"
+          fi
+          echo "tag=${RAW_REF}" >> $GITHUB_OUTPUT
+          CLEAN_VER="${RAW_REF#v}"
+          echo "version=${CLEAN_VER}" >> $GITHUB_OUTPUT
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate Checksums
+        shell: bash
+        run: |
+          cd release-assets
+          echo "Generating SHA256 checksums for release files..."
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Determine Pre-release Status
+        id: release_flags
+        shell: bash
+        run: |
+          TAG="${{ steps.vars.outputs.tag }}"
+          IS_PRERELEASE="${{ github.event.inputs.prerelease }}"
+          if [ -z "$IS_PRERELEASE" ]; then
+            if [[ "$TAG" =~ -(alpha|beta|rc|dev) ]]; then
+              IS_PRERELEASE="true"
+            else
+              IS_PRERELEASE="false"
+            fi
+          fi
+          echo "prerelease=${IS_PRERELEASE}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: Release ${{ steps.vars.outputs.tag }}
+          draft: ${{ github.event.inputs.draft || false }}
+          prerelease: ${{ steps.release_flags.outputs.prerelease == 'true' }}
+          files: release-assets/*
+          generate_release_notes: true

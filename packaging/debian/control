@@ -1,0 +1,10 @@
+Package: goinfer
+Version: VERSION_PLACEHOLDER
+Section: utils
+Priority: optional
+Architecture: ARCH_PLACEHOLDER
+Maintainer: GoInfer Maintainers <maintainers@goinfer.org>
+Description: GoInfer - High-Performance GGUF LLM Runtime & Server
+ High-performance, pure Go LLM inference engine supporting direct GGUF
+ parsing, quantized matrix multiplication (Q2_K to Q8_0), quantized KV-cache,
+ distributed inference, OpenAI & Ollama streaming API, and systemd service.

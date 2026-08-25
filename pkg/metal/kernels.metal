@@ -801,17 +801,6 @@ kernel void kernel_add_residual(
     }
 }
 
-kernel void kernel_kv_write(
-    device float* k_cache            [[buffer(0)]],
-    device float* v_cache            [[buffer(1)]],
-    device const float* k            [[buffer(2)]],
-    device const float* v            [[buffer(3)]],
-    constant uint& layer             [[buffer(4)]],
-    constant uint& slot              [[buffer(5)]],
-    constant uint& max_seq           [[buffer(6)]],
-    constant uint& kv_dim            [[buffer(7)]],
-    uint tid                         [[thread_position_in_grid]]
-) {
 // --- Fused Gate-Up SwiGLU Kernels (Unified Activation Streaming) ---
 
 kernel void gemv_fused_gate_up_swiglu_q4_0(

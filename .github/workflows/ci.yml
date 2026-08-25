@@ -27,6 +27,7 @@ jobs:
         with:
           go-version-file: 'go.mod'
           check-latest: true
+          cache: false
 
       - name: Compile Metal Shaders (macOS)
         if: runner.os == 'macOS'

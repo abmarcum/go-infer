@@ -1,4 +1,12 @@
-# go-infer (`go-infer`)
+<div align="center">
+
+<img src="assets/logo.jpg" alt="go-infer logo" width="280" />
+
+# go-infer
+
+**High-Performance, Pure Go LLM Inference Runtime with Apple Metal GPU & Distributed Acceleration**
+
+</div>
 
 A high-performance, pure Go LLM inference runtime built from scratch using Gemini. It directly parses GGUF binary files (including Ollama model blobs), performs direct quantized matrix-vector arithmetic (`Q2_K`, `Q3_K`, `Q4_0`, `Q4_K`, `Q6_K`, `Q8_0`, `F16`, `F32`), runs full autoregressive transformer forward passes with Rotary Position Embeddings (RoPE), SwiGLU activations, Grouped-Query Attention (GQA), BPE tokenization, advanced sampling, multi-server distributed inference, and serves both an interactive CLI and an OpenAI/Ollama-compatible HTTP streaming API.
 

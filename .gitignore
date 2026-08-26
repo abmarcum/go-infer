@@ -3,12 +3,17 @@
 /go-infer.exe
 /goinfer
 /goinfer.exe
+/goinfer-ios
 /go-inference
 /go-inference.exe
 /bench
 /bench.exe
 /quantize
 /quantize.exe
+/package
+/package.exe
+downloads/
+scratch/
 *.exe
 *.exe~
 *.dll

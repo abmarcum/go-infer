@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>go-infer | High-Performance LLM Runtime</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-main: #0c1017;
+      --bg-panel: #131b26;
+      --bg-bubble-user: #1f2d40;
+      --bg-bubble-bot: #16202c;
+      --accent: #00d2ff;
+      --accent-glow: rgba(0, 210, 255, 0.25);
+      --accent-gradient: linear-gradient(135deg, #00d2ff 0%, #3a7bd5 100%);
+      --text-main: #f0f6fc;
+      --text-muted: #8b949e;
+      --border: #212e40;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg-main);
+      color: var(--text-main);
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Sidebar Controls */
+    aside {
+      width: 320px;
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 24px;
+      gap: 20px;
+      overflow-y: auto;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand-icon {
+      width: 36px;
+      height: 36px;
+      background: var(--accent-gradient);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      color: #000;
+      font-size: 18px;
+      box-shadow: 0 0 16px var(--accent-glow);
+    }
+    .brand-text h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.5px; }
+    .brand-text p { font-size: 12px; color: var(--text-muted); }
+
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .control-group label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+    }
+    .slider-val { color: var(--accent); font-family: 'JetBrains Mono', monospace; }
+    input[type="range"] {
+      accent-color: var(--accent);
+      background: var(--border);
+      height: 6px;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    textarea, input[type="text"] {
+      background: var(--bg-main);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 13px;
+      resize: vertical;
+    }
+    textarea:focus, input[type="text"]:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-glow);
+    }
+
+    .status-badge {
+      padding: 6px 10px;
+      background: rgba(46, 160, 67, 0.15);
+      border: 1px solid rgba(46, 160, 67, 0.4);
+      color: #3fb950;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .status-dot { width: 8px; height: 8px; background: #3fb950; border-radius: 50%; box-shadow: 0 0 8px #3fb950; }
+
+    /* Main Chat Feed */
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-main);
+      position: relative;
+    }
+
+    .chat-header {
+      height: 64px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 28px;
+    }
+    .model-tag {
+      font-size: 13px;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--accent);
+      background: rgba(0, 210, 255, 0.08);
+      padding: 4px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(0, 210, 255, 0.2);
+    }
+
+    .messages-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .message {
+      display: flex;
+      gap: 14px;
+      max-width: 85%;
+      line-height: 1.6;
+      font-size: 14.5px;
+    }
+    .message.user {
+      align-self: flex-end;
+      flex-direction: row-reverse;
+    }
+    .avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    .message.user .avatar { background: var(--accent-gradient); color: #000; }
+    .message.assistant .avatar { background: #233247; color: var(--accent); border: 1px solid var(--border); }
+
+    .bubble {
+      padding: 14px 18px;
+      border-radius: var(--radius);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .message.user .bubble {
+      background: var(--bg-bubble-user);
+      border: 1px solid rgba(0, 210, 255, 0.2);
+      border-top-right-radius: 2px;
+    }
+    .message.assistant .bubble {
+      background: var(--bg-bubble-bot);
+      border: 1px solid var(--border);
+      border-top-left-radius: 2px;
+    }
+
+    /* Input Bar */
+    .input-wrapper {
+      padding: 20px 28px;
+      background: var(--bg-panel);
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+    .input-field {
+      flex: 1;
+      height: 48px;
+      background: var(--bg-main);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0 16px;
+      color: var(--text-main);
+      font-size: 14.5px;
+    }
+    .send-btn {
+      height: 48px;
+      padding: 0 24px;
+      background: var(--accent-gradient);
+      color: #000;
+      border: none;
+      border-radius: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: opacity 0.2s;
+    }
+    .send-btn:hover { opacity: 0.9; }
+    .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    @media (max-width: 768px) {
+      aside { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <aside>
+    <div class="brand">
+      <div class="brand-icon">⚡</div>
+      <div class="brand-text">
+        <h1>go-infer</h1>
+        <p>Pure Go LLM Runtime</p>
+      </div>
+    </div>
+
+    <div class="status-badge">
+      <div class="status-dot"></div>
+      <span id="status-text">Ready & Accelerating</span>
+    </div>
+
+    <div class="control-group">
+      <label>Temperature <span id="temp-val" class="slider-val">0.7</span></label>
+      <input type="range" id="temp-slider" min="0.0" max="1.5" step="0.05" value="0.7">
+    </div>
+
+    <div class="control-group">
+      <label>Top-P <span id="topp-val" class="slider-val">0.90</span></label>
+      <input type="range" id="topp-slider" min="0.1" max="1.0" step="0.05" value="0.9">
+    </div>
+
+    <div class="control-group">
+      <label>Max Tokens <span id="maxtok-val" class="slider-val">512</span></label>
+      <input type="range" id="maxtok-slider" min="64" max="2048" step="64" value="512">
+    </div>
+
+    <div class="control-group">
+      <label>System Prompt</label>
+      <textarea id="sys-prompt" rows="3" placeholder="You are a helpful and concise AI assistant..."></textarea>
+    </div>
+  </aside>
+
+  <main>
+    <div class="chat-header">
+      <div class="model-tag" id="model-tag">Model: Loading...</div>
+      <div style="font-size: 12px; color: var(--text-muted);">OpenAI & Ollama Compatible API</div>
+    </div>
+
+    <div class="messages-container" id="chat-messages">
+      <div class="message assistant">
+        <div class="avatar">⚡</div>
+        <div class="bubble">Hello! I am running on **go-infer**, a high-performance pure Go inference engine. How can I help you today?</div>
+      </div>
+    </div>
+
+    <form class="input-wrapper" id="chat-form">
+      <input type="text" id="user-input" class="input-field" placeholder="Ask anything..." autocomplete="off">
+      <button type="submit" id="send-btn" class="send-btn">Send ➔</button>
+    </form>
+  </main>
+
+  <script>
+    const messagesEl = document.getElementById('chat-messages');
+    const formEl = document.getElementById('chat-form');
+    const inputEl = document.getElementById('user-input');
+    const sendBtn = document.getElementById('send-btn');
+    const modelTag = document.getElementById('model-tag');
+
+    const tempSlider = document.getElementById('temp-slider');
+    const toppSlider = document.getElementById('topp-slider');
+    const maxtokSlider = document.getElementById('maxtok-slider');
+
+    tempSlider.oninput = () => document.getElementById('temp-val').textContent = tempSlider.value;
+    toppSlider.oninput = () => document.getElementById('topp-val').textContent = parseFloat(toppSlider.value).toFixed(2);
+    maxtokSlider.oninput = () => document.getElementById('maxtok-val').textContent = maxtokSlider.value;
+
+    let conversation = [];
+
+    // Fetch health and model name
+    fetch('/health')
+      .then(r => r.json())
+      .then(d => {
+        modelTag.textContent = 'Model: ' + (d.model || 'GGUF');
+      }).catch(() => {
+        modelTag.textContent = 'Model: go-infer';
+      });
+
+    formEl.onsubmit = async (e) => {
+      e.preventDefault();
+      const text = inputEl.value.trim();
+      if (!text) return;
+
+      inputEl.value = '';
+      inputEl.disabled = true;
+      sendBtn.disabled = true;
+
+      // Add user message
+      conversation.push({ role: 'user', content: text });
+      appendMessage('user', text);
+
+      // Create bot placeholder
+      const botBubble = appendMessage('assistant', '');
+
+      const payload = {
+        model: 'default',
+        messages: [
+          ...(document.getElementById('sys-prompt').value ? [{ role: 'system', content: document.getElementById('sys-prompt').value }] : []),
+          ...conversation
+        ],
+        stream: true,
+        temperature: parseFloat(tempSlider.value),
+        top_p: parseFloat(toppSlider.value),
+        max_tokens: parseInt(maxtokSlider.value)
+      };
+
+      try {
+        const res = await fetch('/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let fullReply = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value);
+          const lines = chunk.split('\n');
+          for (const line of lines) {
+            if (line.startsWith('data: ') && !line.includes('[DONE]')) {
+              try {
+                const parsed = JSON.parse(line.slice(6));
+                const delta = parsed.choices[0].delta?.content || '';
+                fullReply += delta;
+                botBubble.textContent = fullReply;
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+              } catch (_) {}
+            }
+          }
+        }
+        conversation.push({ role: 'assistant', content: fullReply });
+      } catch (err) {
+        botBubble.textContent = 'Error communicating with go-infer server: ' + err.message;
+      } finally {
+        inputEl.disabled = false;
+        sendBtn.disabled = false;
+        inputEl.focus();
+      }
+    };
+
+    function appendMessage(role, text) {
+      const msg = document.createElement('div');
+      msg.className = 'message ' + role;
+      const avatar = document.createElement('div');
+      avatar.className = 'avatar';
+      avatar.textContent = role === 'user' ? 'U' : '⚡';
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.textContent = text;
+      msg.appendChild(avatar);
+      msg.appendChild(bubble);
+      messagesEl.appendChild(msg);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return bubble;
+    }
+  </script>
+</body>
+</html>

@@ -166,3 +166,41 @@ func TestServerCORSHeaders(t *testing.T) {
 		t.Errorf("Expected CORS origin 'https://example.com', got '%s'", rec.Header().Get("Access-Control-Allow-Origin"))
 	}
 }
+
+func TestServerWebUI(t *testing.T) {
+	s := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	s.handleWebUI(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK for Web UI root, got %d", rec.Code)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("go-infer")) {
+		t.Errorf("Expected Web UI HTML to contain 'go-infer'")
+	}
+}
+
+func TestServerMetrics(t *testing.T) {
+	s := &Server{
+		RequestsTotal:    5,
+		TokensTotal:      100,
+		PrefillMillis:    50,
+		GenerationMillis: 200,
+	}
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+
+	s.handleMetrics(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK for /metrics, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !bytes.Contains([]byte(body), []byte("goinfer_requests_total 5")) {
+		t.Errorf("Metrics output missing requests total counter: %s", body)
+	}
+	if !bytes.Contains([]byte(body), []byte("goinfer_tokens_generated_total 100")) {
+		t.Errorf("Metrics output missing tokens counter: %s", body)
+	}
+}
+

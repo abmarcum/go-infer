@@ -26,6 +26,7 @@ type Engine struct {
 	OutNormBuf         unsafe.Pointer
 	OutWeightBuf       unsafe.Pointer
 	OutWeightTyp       int
+	PrefixCache        *PrefixCache
 	mu                 sync.Mutex
 }
 
@@ -197,6 +198,7 @@ func LoadModel(filePath string, numThreads int) (*Engine, error) {
 		OutNormBuf:         outNormBuf,
 		OutWeightBuf:       outWeightBuf,
 		OutWeightTyp:       outWeightTyp,
+		PrefixCache:        NewPrefixCache(32),
 	}, nil
 }
 
@@ -259,21 +261,46 @@ func (e *Engine) Generate(prompt string, maxTokens int, params sampler.Params, o
 		}
 	}
 
-	kv := e.NewKVCache()
-	pos := 0
+	// Supply vocabulary for structured JSON & grammar constraints if needed
+	if params.JSONValidator != nil && len(params.Vocab) == 0 {
+		params.Vocab = e.Tokenizer.Vocab
+	}
 
-	// 1. Prefill / Ingest prompt tokens in parallel via batched GEMM
+	// 1. Check Prefix / Prompt KV-Cache for instant reuse
+	var kv *KVCache
+	pos := 0
 	startPrefill := time.Now()
-	if len(tokens) > 1 {
-		e.ForwardBatch(tokens, kv)
-		pos = len(tokens)
-	} else {
-		for _, tok := range tokens {
-			e.Forward(tok, pos, kv)
-			pos++
+
+	if e.PrefixCache != nil {
+		matchedLen, cachedKV := e.PrefixCache.FindLongestPrefix(tokens)
+		if matchedLen > 0 && cachedKV != nil {
+			kv = cachedKV
+			pos = matchedLen
+		}
+	}
+
+	if kv == nil {
+		kv = e.NewKVCache()
+	}
+
+	// 2. Prefill remaining uncached prompt tokens
+	if pos < len(tokens) {
+		if pos == 0 && len(tokens) > 1 {
+			e.ForwardBatch(tokens, kv)
+			pos = len(tokens)
+		} else {
+			for pos < len(tokens) {
+				e.Forward(tokens[pos], pos, kv)
+				pos++
+			}
 		}
 	}
 	prefillDur := time.Since(startPrefill)
+
+	// Cache the full prompt KV-cache state for future queries
+	if e.PrefixCache != nil {
+		e.PrefixCache.Store(tokens, kv)
+	}
 
 	history := append([]int{}, tokens...)
 	curTok := tokens[len(tokens)-1]

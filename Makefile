@@ -50,6 +50,10 @@ rpm: packages
 install:
 	go install -ldflags="$(LDFLAGS)" .
 
+## Build Docker container image
+docker-build:
+	docker build -t $(BINARY_NAME):latest .
+
 ## Remove compiled binaries
 clean:
 	rm -rf $(BINARY_NAME) bin/

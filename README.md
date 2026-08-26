@@ -19,11 +19,16 @@ A high-performance, pure Go LLM inference runtime built from scratch using Gemin
 3. **Direct GGUF Binary Parser**: Full support for GGUF v2 and v3 binary metadata formats and tensor headers.
 4. **Direct Quantized GEMV (`Q2_K`, `Q3_K`, `Q4_0`, `Q4_K`, `Q6_K`, `Q8_0`)**: Computes vector-matrix dot products directly over packed sub-byte nibbles and blocks, reducing memory footprint by up to **83%** and boosting token generation speed.
 5. **Quantized KV-Cache (`--kv-type=f32|q8_0|q4_0`)**: Stores attention key/value history in 8-bit or 4-bit quantized blocks, cutting context window RAM by up to **4×**.
-6. **Zero-Allocation GPU Pipeline**: C-pinned layer weights and pre-allocated GPU activation buffers maintain intermediate states 100% inside GPU VRAM across all 40 transformer layers.
-7. **Fast Top-K / Top-P Sampler**: $O(N \log K)$ bounded top-K selection over 152k vocabulary logits in < 0.2ms with zero heap allocations.
-8. **Multi-Server Distributed Inference**: Supports Distributed Speculative Decoding, Pipeline Parallelism, and Tensor Parallelism via simple CLI flags.
-9. **Built-in Model Quantizer (`cmd/quantize`)**: Converts F32/F16/Q8 GGUF weights into compact `Q4_0` or `Q8_0` formats directly in pure Go.
-10. **OpenAI & Ollama Compatible Server**: Native HTTP server exposing `/v1/chat/completions` (with Server-Sent Events / SSE streaming) and `/api/generate` (NDJSON streaming).
+6. **Prefix & Prompt KV-Cache (Radix Caching)**: Reuses precomputed KV-cache states for shared system prompts and multi-turn chat prefixes, dropping prefill latency to **~0 ms**.
+7. **Embeddings API (`/v1/embeddings`)**: Generates L2-normalized dense vector embeddings for semantic search, vector databases, and RAG pipelines.
+8. **JSON Schema & Grammar-Constrained Decoding**: Dynamic token logit masking guaranteeing 100% syntactically valid JSON responses.
+9. **OpenAI Tool & Function Calling**: Supports OpenAI `tools` and `tool_calls` schemas natively.
+10. **Direct Hugging Face Model Downloader (`pull`)**: Download models directly from Hugging Face Hub (`goinfer pull unsloth/Llama-3.2-1B-Instruct-GGUF`) with auto-discovery and progress bars.
+11. **Embedded Web Chat UI Dashboard**: Sleek, dark-mode browser interface served directly at `http://localhost:8080` with real-time SSE streaming.
+12. **Prometheus Metrics Endpoint (`/metrics`)**: Export real-time token throughput, prefill duration, and request counts for monitoring.
+13. **Multi-Server Distributed Inference**: Supports Distributed Speculative Decoding, Pipeline Parallelism, and Tensor Parallelism via simple CLI flags.
+14. **Built-in Model Quantizer (`cmd/quantize`)**: Converts F32/F16/Q8 GGUF weights into compact `Q4_0` or `Q8_0` formats directly in pure Go.
+15. **OpenAI & Ollama Compatible Server**: Native HTTP server exposing `/v1/chat/completions`, `/v1/embeddings`, `/api/generate`, and `/api/tags`.
 
 ---
 
@@ -34,67 +39,41 @@ go-infer/
 ├── main.go                       # Main CLI & Server entrypoint
 ├── Makefile                      # Build, test, packaging, and benchmark targets
 ├── go.mod                        # Go module definition
+├── assets/
+│   └── logo.jpg                  # Project logo asset
 ├── cmd/
 │   ├── bench/                    # Side-by-side benchmark runner (Pure Go vs Native Ollama)
-│   │   └── main.go
 │   ├── package/                  # Universal pure-Go Debian (.deb) & RPM package generator
-│   │   └── main.go
 │   └── quantize/                 # Standalone model quantizer utility (F32/F16 -> Q4_0/Q8_0)
-│       └── main.go
-├── packaging/                    # Enterprise Linux distribution assets
-│   ├── systemd/
-│   │   └── goinfer.service       # Sandboxed systemd service definition
-│   ├── default/
-│   │   └── goinfer.conf          # System environment configuration
-│   ├── debian/                   # Debian/Ubuntu control, postinst, prerm, postrm
-│   └── rpm/
-│       └── goinfer.spec          # RedHat/CentOS/Fedora RPM spec file
+├── packaging/                    # Enterprise Linux distribution assets (systemd, deb, rpm)
 ├── pkg/
+│   ├── downloader/               # Hugging Face Hub GGUF streaming downloader
+│   │   ├── hf.go
+│   │   └── hf_test.go
 │   ├── gguf/                     # GGUF v2/v3 parser, metadata reader, mmap loader
-│   │   ├── gguf.go
-│   │   ├── gguf_test.go
-│   │   ├── mmap_unix.go
-│   │   ├── mmap_windows.go
-│   │   ├── reader.go
-│   │   └── types.go
-│   ├── quant/                    # Quantization kernels & FP16 conversions
-│   │   ├── fp16.go
-│   │   ├── quant.go              # Direct Q2_K, Q3_K, Q4_0, Q8_0 dot-products & quantizers
-│   │   └── quant_test.go
-│   ├── math/                     # Math kernels & Multithreaded GEMV
-│   │   ├── math.go               # RMSNorm, RoPE, SwiGLU (SiLU), Softmax
-│   │   ├── gemv.go               # Multithreaded CPU worker pool
-│   │   └── math_test.go
-│   ├── metal/                    # Apple Metal GPU compute backend
-│   │   ├── kernels.metal         # MSL compute shaders (8-way SIMD, fused Gate-Up)
-│   │   ├── metal_bridge.h        # CGo bridging interface
-│   │   ├── metal_bridge_darwin.m # Objective-C Metal pipeline orchestrator
-│   │   ├── metal_darwin.go       # Darwin CGo bindings & layer weight handles
-│   │   ├── metal_fallback.go     # Cross-platform fallback stubs
-│   │   └── metal_test.go         # GPU kernel unit tests & benchmarks
-│   ├── distributed/              # Multi-server distributed coordination
-│   │   ├── types.go
-│   │   ├── speculative.go        # Distributed speculative decoding coordinator
-│   │   ├── pipeline.go           # Pipeline parallelism stage routing
-│   │   ├── tensor_parallel.go    # Tensor parallelism AllReduce
-│   │   └── distributed_test.go
+│   ├── quant/                    # Direct Q2_K, Q3_K, Q4_0, Q4_K, Q6_K, Q8_0 dot-products
+│   ├── math/                     # RMSNorm, RoPE, SwiGLU (SiLU), Softmax & multithreaded GEMV
+│   ├── metal/                    # Apple Metal GPU compute backend & MSL shaders
+│   ├── distributed/              # Pipeline Parallelism, Tensor Parallelism & Speculative Decoding
 │   ├── tokenizer/                # BPE tokenizer & merge evaluation
-│   │   ├── tokenizer.go
-│   │   └── tokenizer_test.go
-│   ├── engine/                   # Transformer forward pass & model execution
-│   │   ├── config.go             # Model hyperparameters
-│   │   ├── kvcache.go            # Sliding window quantized KV cache (f32, q8_0, q4_0)
-│   │   ├── arena.go              # Zero-allocation working buffers
-│   │   ├── weights.go            # Weight extraction, GPU buffers & dispatch
-│   │   ├── forward.go            # Full LLaMA transformer forward pass
+│   ├── engine/                   # Transformer forward pass, Prefix Cache, Paged KV & Embeddings
+│   │   ├── config.go
+│   │   ├── embeddings.go         # L2-normalized dense embeddings generator
 │   │   ├── engine.go             # Thread-safe orchestrator & generation API
-│   │   └── engine_test.go        # Synthetic GGUF end-to-end tests
-│   ├── sampler/                  # Sampling algorithms
-│   │   ├── sampler.go            # Temp, Top-K, Top-P, Repetition penalty
-│   │   └── sampler_test.go
-│   └── server/                   # HTTP Server
-│       ├── http.go               # OpenAI & Ollama streaming endpoints with security hardening
-│       └── http_test.go
+│   │   ├── forward.go            # Full LLaMA transformer forward pass
+│   │   ├── kvcache.go            # Quantized KV cache (f32, q8_0, q4_0)
+│   │   ├── paged_kv.go           # Block-based Paged KV cache memory pool
+│   │   ├── prefix_cache.go       # Radix / Prefix KV-cache reuse manager
+│   │   └── weights.go            # Weight extraction & GPU buffer handles
+│   ├── sampler/                  # Sampler & JSON grammar constraint masking
+│   │   ├── grammar.go            # JSON state machine & logit constraint validator
+│   │   ├── grammar_test.go
+│   │   └── sampler.go
+│   └── server/                   # HTTP Server (OpenAI, Ollama, Web UI, Metrics)
+│       ├── http.go
+│       ├── http_test.go
+│       └── web/
+│           └── ui.html           # Embedded dark-mode streaming Web UI
 ```
 
 ---
@@ -115,6 +94,7 @@ If you have `make` installed:
 ```bash
 make build        # Build local goinfer binary
 make build-prod   # Build optimized binary with stripped symbols
+make docker-build # Build Docker container image (go-infer:latest)
 make test         # Run test suite
 make bench        # Build benchmark tool
 make quantize     # Build model quantizer tool
@@ -215,6 +195,34 @@ go install .
 
 ---
 
+## 🐳 Docker & Container Deployment
+
+`GoInfer` provides multi-stage, zero-dependency Docker container images running unprivileged with built-in healthchecks:
+
+### 1. Build Docker Image
+```bash
+docker build -t go-infer:latest .
+```
+
+### 2. Run Container with Local Model Mount
+Mount your local directory containing `.gguf` files into `/models`:
+```bash
+docker run -d \
+  --name goinfer \
+  -p 8080:8080 \
+  -v $(pwd)/models:/models \
+  go-infer:latest --serve :8080 /models/model.gguf
+```
+
+### 3. Docker Compose
+Deploy instantly with the included `docker-compose.yml`:
+```bash
+docker compose up -d
+```
+Access the streaming Web UI dashboard at `http://localhost:8080`.
+
+---
+
 ## Locating Ollama Models
 
 Ollama stores its GGUF weights directly on your disk in blob format:
@@ -236,44 +244,82 @@ The largest file (e.g. `sha256-1194192cf2a1...`) is your GGUF model file.
 
 ## Usage
 
-### 1. Direct CLI Prompt Completion
+### 1. Direct Hugging Face Model Downloader (`pull`)
+Download any GGUF model directly from Hugging Face Hub with live streaming progress:
+```bash
+# Auto-discovers recommended Q4_K_M GGUF in repository
+./goinfer pull unsloth/Llama-3.2-1B-Instruct-GGUF
+
+# Or pull a specific GGUF file directly
+./goinfer pull TheBloke/Llama-2-7B-Chat-GGUF/llama-2-7b-chat.Q4_K_M.gguf
+```
+
+### 2. Direct CLI Prompt Completion
 Run inference directly against any GGUF file or Ollama model blob:
 ```bash
-./goinfer ~/.ollama/models/blobs/sha256-<hash> "Explain goroutines in Go in two sentences."
+./goinfer models/llama-3.2-1b-instruct.Q4_K_M.gguf "Explain goroutines in Go in two sentences."
 ```
 
-### 2. Interactive REPL Chat
-Omit the prompt argument to start interactive multi-turn chat:
+### 3. Interactive REPL Chat
+Omit the prompt argument to start interactive multi-turn chat with automatic prompt template detection (LLaMA 3 / ChatML):
 ```bash
-./goinfer ~/.ollama/models/blobs/sha256-<hash>
+./goinfer models/llama-3.2-1b-instruct.Q4_K_M.gguf
 ```
 
-### 3. OpenAI-Compatible HTTP Streaming Server
-Launch the HTTP API on port 8080:
+### 4. HTTP Server with Embedded Web Chat UI & OpenAI / Ollama API
+Launch the unified server on port 8080:
 ```bash
-./goinfer --serve :8080 ~/.ollama/models/blobs/sha256-<hash>
+./goinfer --serve :8080 models/llama-3.2-1b-instruct.Q4_K_M.gguf
 ```
 
-#### Test with cURL (OpenAI Chat Completions API)
+#### A. Embedded Dark-Mode Web UI
+Open `http://localhost:8080` in any modern web browser to access the built-in streaming chat dashboard with real-time SSE generation and interactive parameter sliders.
+
+#### B. OpenAI Chat Completions API (Streaming & JSON Mode)
 ```bash
+# Standard Streaming Chat
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "llama3.2",
-    "messages": [
-      {"role": "user", "content": "What is the speed of light?"}
-    ],
+    "model": "default",
+    "messages": [{"role": "user", "content": "Write a haiku about Go."}],
     "stream": true,
     "temperature": 0.7
   }'
+
+# JSON Schema / Structured Output Constrained Decoding
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
+    "messages": [{"role": "user", "content": "Extract name and age: Alice is 30 years old."}],
+    "response_format": {"type": "json_object"}
+  }'
 ```
 
-#### Test with cURL (Ollama API)
+#### C. Embeddings API (`/v1/embeddings`)
+Generate L2-normalized dense vector embeddings for RAG or vector database indexing:
+```bash
+curl http://localhost:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
+    "input": "High-performance inference engine in pure Go"
+  }'
+```
+
+#### D. Prometheus Metrics (`/metrics`)
+Scrape real-time server telemetry:
+```bash
+curl http://localhost:8080/metrics
+```
+
+#### E. Ollama Compatible API (`/api/generate`)
 ```bash
 curl http://localhost:8080/api/generate \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "llama3.2",
+    "model": "default",
     "prompt": "Why is the sky blue?",
     "stream": true
   }'

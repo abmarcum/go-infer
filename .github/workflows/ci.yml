@@ -76,3 +76,111 @@ jobs:
           go build -v ./cmd/bench
           go build -v ./cmd/quantize
           go build -v ./cmd/package
+
+  test-redhat:
+    name: Test (Red Hat UBI 9 / RHEL)
+    runs-on: ubuntu-latest
+    container:
+      image: registry.access.redhat.com/ubi9/ubi
+    steps:
+      - name: Install Go & Build Dependencies (DNF)
+        run: |
+          dnf install -y golang git make rpm-build
+          go version
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Go Vet
+        run: go vet ./...
+
+      - name: Run Tests
+        run: go test -v ./...
+
+      - name: Build Commands & Verify RPM Generation
+        run: |
+          go build -v .
+          go build -v ./cmd/bench
+          go build -v ./cmd/quantize
+          go build -v ./cmd/package
+          go run ./cmd/package -version 1.0.0
+
+  test-alpine:
+    name: Test (Alpine Linux / musl)
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:latest
+    steps:
+      - name: Install Build Dependencies (APK)
+        run: apk add --no-cache go git make
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Go Vet
+        run: go vet ./...
+
+      - name: Run Tests
+        run: go test -v ./...
+
+      - name: Build All Commands (Static Musl)
+        run: |
+          go build -v .
+          go build -v ./cmd/bench
+          go build -v ./cmd/quantize
+          go build -v ./cmd/package
+
+  verify-cross-compile:
+    name: Cross-Compile (${{ matrix.target.goos }}/${{ matrix.target.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { goos: linux, goarch: arm64 }
+          - { goos: windows, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+          cache: false
+
+      - name: Verify Cross Compilation
+        env:
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          echo "Cross-compiling for ${{ matrix.target.goos }}/${{ matrix.target.goarch }}..."
+          go build -v -o /dev/null .
+          go build -v -o /dev/null ./cmd/bench
+          go build -v -o /dev/null ./cmd/quantize
+          go build -v -o /dev/null ./cmd/package
+
+  security-audit:
+    name: Security Audit (govulncheck)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+          cache: false
+
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+

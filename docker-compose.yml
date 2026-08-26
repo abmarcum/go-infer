@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  goinfer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: go-infer:latest
+    container_name: goinfer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount your local GGUF models directory
+      - ./models:/models
+    command: ["--serve", ":8080", "/models/model.gguf"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    environment:
+      - TZ=UTC

@@ -5,6 +5,7 @@ import (
 	"flag"
 	_ "embed"
 	"fmt"
+	"go-inference/pkg/downloader"
 	"go-inference/pkg/engine"
 	"go-inference/pkg/metal"
 	"go-inference/pkg/sampler"
@@ -68,9 +69,30 @@ func main() {
 	flag.IntVar(&tpRank, "tp-rank", 0, "Tensor parallelism rank of this worker (0, 1, ...)")
 	flag.StringVar(&tpPeers, "tp-peers", "", "Comma-separated peer URLs for tensor parallel AllReduce")
 
+	// Check for 'pull' subcommand
+	if len(os.Args) >= 2 && os.Args[1] == "pull" {
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: go-infer pull <huggingface-repo-or-model>")
+			fmt.Println("Example: go-infer pull unsloth/Llama-3.2-1B-Instruct-GGUF")
+			os.Exit(1)
+		}
+		target := os.Args[2]
+		fmt.Printf(">>> Pulling GGUF model from Hugging Face: %s\n", target)
+		savedPath, err := downloader.DownloadHuggingFaceGGUF(target, "models", func(downloaded, total int64, percent, speed float64) {
+			fmt.Printf("\rDownloading: %.1f%% (%.2f MB / %.2f MB) @ %.2f MB/s",
+				percent, float64(downloaded)/(1024*1024), float64(total)/(1024*1024), speed)
+		})
+		if err != nil {
+			log.Fatalf("\nDownload failed: %v", err)
+		}
+		fmt.Printf("\nModel successfully saved to: %s\n", savedPath)
+		return
+	}
+
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "go-infer - High-Performance GGUF LLM Runtime in Go\n\n")
 		fmt.Fprintf(os.Stderr, "Usage:\n")
+		fmt.Fprintf(os.Stderr, "  Pull Model:     go-infer pull <hf-repo/model>\n")
 		fmt.Fprintf(os.Stderr, "  Local Prompt:   go-infer [flags] <path-to-gguf> \"<prompt>\"\n")
 		fmt.Fprintf(os.Stderr, "  Interactive:    go-infer [flags] <path-to-gguf>\n")
 		fmt.Fprintf(os.Stderr, "  HTTP Server:    go-infer --serve :8080 <path-to-gguf>\n")

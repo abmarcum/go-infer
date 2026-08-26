@@ -62,13 +62,20 @@ jobs:
       - name: Run Go Vet
         run: go vet ./...
 
-      - name: Run Tests
+      - name: Run Tests (Linux)
+        if: runner.os == 'Linux'
         run: go test -v -race ./...
-        if: matrix.os != 'windows-latest'
+
+      - name: Run Tests (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # Use macOS classic linker to prevent dyld LC_UUID abort trap under Xcode 15+ on Apple Silicon
+          export CGO_LDFLAGS="-Wl,-ld_classic"
+          go test -v -race ./...
 
       - name: Run Tests (Windows)
+        if: runner.os == 'Windows'
         run: go test -v ./...
-        if: matrix.os == 'windows-latest'
 
       - name: Build All Commands
         run: |

@@ -1,34 +1,55 @@
 <div align="center">
 
-<img src="assets/logo.jpg" alt="go-infer logo" width="280" />
+<img src="assets/logo.jpg" alt="go-infer logo" width="300" />
 
 # go-infer
 
 **High-Performance, Pure Go LLM Inference Runtime with Apple Metal GPU & Distributed Acceleration**
 
-</div>
+[![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)](https://go.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20|%20Linux%20|%20Windows%20|%20iOS-blue)](README.md)
+[![Dependencies](https://img.shields.io/badge/Dependencies-Zero%20(Stdlib)-brightgreen)](go.mod)
 
-A high-performance, pure Go LLM inference runtime built from scratch using Gemini. It directly parses GGUF binary files (including Ollama model blobs), performs direct quantized matrix-vector arithmetic (`Q2_K`, `Q3_K`, `Q4_0`, `Q4_K`, `Q6_K`, `Q8_0`, `F16`, `F32`), runs full autoregressive transformer forward passes with Rotary Position Embeddings (RoPE), SwiGLU activations, Grouped-Query Attention (GQA), BPE tokenization, advanced sampling, multi-server distributed inference, and serves both an interactive CLI and an OpenAI/Ollama-compatible HTTP streaming API.
+</div>
 
 ---
 
-## Key Features
+## 📌 Executive Summary
 
-1. **Apple Metal GPU Acceleration on macOS**: Utilizes Apple Silicon unified memory (`MTLResourceStorageModeShared`) and custom Metal Shading Language (MSL) compute kernels with 8-way SIMD unrolling, 128-thread cooperative threadgroup reductions, fused Gate-Up SwiGLU kernels, and a single-call 40-layer transformer pipeline.
-2. **Pure Go Fallback on Linux/Windows**: Seamlessly falls back to a multithreaded pure Go CPU engine on non-Darwin platforms or when CGo is disabled.
-3. **Direct GGUF Binary Parser**: Full support for GGUF v2 and v3 binary metadata formats and tensor headers.
-4. **Direct Quantized GEMV (`Q2_K`, `Q3_K`, `Q4_0`, `Q4_K`, `Q6_K`, `Q8_0`)**: Computes vector-matrix dot products directly over packed sub-byte nibbles and blocks, reducing memory footprint by up to **83%** and boosting token generation speed.
-5. **Quantized KV-Cache (`--kv-type=f32|q8_0|q4_0`)**: Stores attention key/value history in 8-bit or 4-bit quantized blocks, cutting context window RAM by up to **4×**.
-6. **Prefix & Prompt KV-Cache (Radix Caching)**: Reuses precomputed KV-cache states for shared system prompts and multi-turn chat prefixes, dropping prefill latency to **~0 ms**.
-7. **Embeddings API (`/v1/embeddings`)**: Generates L2-normalized dense vector embeddings for semantic search, vector databases, and RAG pipelines.
-8. **JSON Schema & Grammar-Constrained Decoding**: Dynamic token logit masking guaranteeing 100% syntactically valid JSON responses.
-9. **OpenAI Tool & Function Calling**: Supports OpenAI `tools` and `tool_calls` schemas natively.
-10. **Direct Hugging Face Model Downloader (`pull`)**: Download models directly from Hugging Face Hub (`goinfer pull unsloth/Llama-3.2-1B-Instruct-GGUF`) with auto-discovery and progress bars.
-11. **Embedded Web Chat UI Dashboard**: Sleek, dark-mode browser interface served directly at `http://localhost:8080` with real-time SSE streaming.
-12. **Prometheus Metrics Endpoint (`/metrics`)**: Export real-time token throughput, prefill duration, and request counts for monitoring.
-13. **Multi-Server Distributed Inference**: Supports Distributed Speculative Decoding, Pipeline Parallelism, and Tensor Parallelism via simple CLI flags.
-14. **Built-in Model Quantizer (`cmd/quantize`)**: Converts F32/F16/Q8 GGUF weights into compact `Q4_0` or `Q8_0` formats directly in pure Go.
-15. **OpenAI & Ollama Compatible Server**: Native HTTP server exposing `/v1/chat/completions`, `/v1/embeddings`, `/api/generate`, and `/api/tags`.
+**`go-infer`** is a lightweight, zero-external-dependency LLM inference engine written in pure Go with native Apple Metal GPU acceleration for macOS and an optimized parallel CPU runtime for Linux and Windows.
+
+It parses GGUF binary files directly, executes quantized matrix math (`Q2_K` through `Q8_0`), serves OpenAI- and Ollama-compatible streaming APIs, provides an embedded real-time Web UI dashboard, and scales horizontally across multiple machines with Distributed Speculative Decoding and Pipeline Parallelism.
+
+---
+
+## ⚡ Key Features at a Glance
+
+| Category | Highlights |
+| :--- | :--- |
+| **🚀 Compute & GPU Acceleration** | • **Apple Metal GPU Pipeline**: 8-way SIMD, fused Gate-Up SwiGLU, 100% VRAM residency<br>• **Pure Go CPU Fallback**: Multithreaded worker pool on Linux, Windows & iOS<br>• **Quantized Matrix Math**: Direct vector dot-products (`Q2_K`, `Q3_K`, `Q4_0`, `Q4_K`, `Q6_K`, `Q8_0`) |
+| **🧠 Memory & Context Optimization** | • **Prefix & Prompt Cache (Radix)**: Instant KV reuse dropping prefill latency to **~0 ms**<br>• **Quantized KV-Cache**: 8-bit & 4-bit attention storage cutting context RAM by **4×**<br>• **Paged KV Memory**: Block-table allocation eliminating memory fragmentation |
+| **🛠️ Native APIs & Developer Tooling** | • **Hugging Face Downloader (`pull`)**: Stream models directly with auto-discovery<br>• **Embedded Dark-Mode Web UI**: Built-in streaming chat at `http://localhost:8080`<br>• **OpenAI & Ollama APIs**: SSE & NDJSON streaming endpoints with tool calling<br>• **JSON Grammar Mode**: Guaranteed valid JSON via logit masking<br>• **Embeddings API**: Dense vector extraction for RAG & vector databases<br>• **Prometheus Telemetry**: Real-time throughput & latency metrics (`/metrics`) |
+| **🌐 Multi-Server Distributed Scaling** | • **Distributed Speculative Decoding**: 2×–3× speedup over standard LAN/Wi-Fi<br>• **Pipeline Parallelism**: Split 70B–405B models across multiple nodes (1 hop/tok)<br>• **Tensor Parallelism**: Split matrix computation with AllReduce synchronization |
+| **📦 Deployment & Packaging** | • **Zero External Go Dependencies**: Standard library only (no CGo on Linux/Windows)<br>• **Docker & Compose**: Hardened, unprivileged container images with health checks<br>• **Linux Distribution Packages**: Native Debian (`.deb`) and Red Hat (`.rpm`) installers |
+
+---
+
+## 🚀 Quick Start (30 Seconds)
+
+```bash
+# 1. Build the binary
+make build
+
+# 2. Pull a model directly from Hugging Face
+./goinfer pull unsloth/Llama-3.2-1B-Instruct-GGUF
+
+# 3. Launch HTTP server & Web Chat UI
+./goinfer --serve :8080 models/llama-3.2-1b-instruct.Q4_K_M.gguf
+
+# 4. Open http://localhost:8080 in your browser or chat via CLI
+./goinfer models/llama-3.2-1b-instruct.Q4_K_M.gguf "Explain goroutines in Go in two sentences."
+```
 
 ---
 
@@ -37,6 +58,8 @@ A high-performance, pure Go LLM inference runtime built from scratch using Gemin
 ```
 go-infer/
 ├── main.go                       # Main CLI & Server entrypoint
+├── Dockerfile                    # Multi-stage container definition
+├── docker-compose.yml            # Container orchestration config
 ├── Makefile                      # Build, test, packaging, and benchmark targets
 ├── go.mod                        # Go module definition
 ├── assets/
@@ -48,8 +71,6 @@ go-infer/
 ├── packaging/                    # Enterprise Linux distribution assets (systemd, deb, rpm)
 ├── pkg/
 │   ├── downloader/               # Hugging Face Hub GGUF streaming downloader
-│   │   ├── hf.go
-│   │   └── hf_test.go
 │   ├── gguf/                     # GGUF v2/v3 parser, metadata reader, mmap loader
 │   ├── quant/                    # Direct Q2_K, Q3_K, Q4_0, Q4_K, Q6_K, Q8_0 dot-products
 │   ├── math/                     # RMSNorm, RoPE, SwiGLU (SiLU), Softmax & multithreaded GEMV
@@ -57,21 +78,8 @@ go-infer/
 │   ├── distributed/              # Pipeline Parallelism, Tensor Parallelism & Speculative Decoding
 │   ├── tokenizer/                # BPE tokenizer & merge evaluation
 │   ├── engine/                   # Transformer forward pass, Prefix Cache, Paged KV & Embeddings
-│   │   ├── config.go
-│   │   ├── embeddings.go         # L2-normalized dense embeddings generator
-│   │   ├── engine.go             # Thread-safe orchestrator & generation API
-│   │   ├── forward.go            # Full LLaMA transformer forward pass
-│   │   ├── kvcache.go            # Quantized KV cache (f32, q8_0, q4_0)
-│   │   ├── paged_kv.go           # Block-based Paged KV cache memory pool
-│   │   ├── prefix_cache.go       # Radix / Prefix KV-cache reuse manager
-│   │   └── weights.go            # Weight extraction & GPU buffer handles
 │   ├── sampler/                  # Sampler & JSON grammar constraint masking
-│   │   ├── grammar.go            # JSON state machine & logit constraint validator
-│   │   ├── grammar_test.go
-│   │   └── sampler.go
 │   └── server/                   # HTTP Server (OpenAI, Ollama, Web UI, Metrics)
-│       ├── http.go
-│       ├── http_test.go
 │       └── web/
 │           └── ui.html           # Embedded dark-mode streaming Web UI
 ```
@@ -528,6 +536,6 @@ gomobile bind -target=ios -o GoInfer.xcframework ./pkg/engine ./pkg/server
 
 ## 📄 License
 
-This project is licensed under the **MIT License** - see the [LICENSE](file:///Users/andrew/ai-workspace/code/go-infer/LICENSE) file for details.
+This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
 
 

@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+      - '[0-9]+.[0-9]+.[0-9]+*'
   workflow_dispatch:
     inputs:
       tag_name:
@@ -238,8 +239,9 @@ jobs:
         shell: bash
         run: |
           cd release-assets
+          rm -f checksums.txt
           echo "Generating SHA256 checksums for release files..."
-          sha256sum * > checksums.txt
+          find . -maxdepth 1 -type f -exec sha256sum {} + | sed 's| \./|  |' | sort -k2 > checksums.txt
           cat checksums.txt
 
       - name: Determine Pre-release Status

@@ -113,6 +113,7 @@ jobs:
           CGO_ENABLED: ${{ matrix.cgo }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          CGO_LDFLAGS: ${{ matrix.goos == 'darwin' && matrix.cgo == '1' && '-Wl,-ld_classic' || '' }}
         run: |
           mkdir -p build_stage
           LDFLAGS="-s -w -X main.Version=${{ steps.vars.outputs.tag }}"

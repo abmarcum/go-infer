@@ -69,9 +69,9 @@ jobs:
       - name: Run Tests (macOS)
         if: runner.os == 'macOS'
         run: |
-          # Use macOS classic linker to prevent dyld LC_UUID abort trap under Xcode 15+ on Apple Silicon
+          # Use macOS classic linker and external linking to prevent dyld LC_UUID abort trap on pure Go packages under Xcode 15+
           export CGO_LDFLAGS="-Wl,-ld_classic"
-          go test -v -race ./...
+          go test -ldflags="-linkmode=external" -v -race ./...
 
       - name: Run Tests (Windows)
         if: runner.os == 'Windows'

@@ -86,6 +86,7 @@ jobs:
       - name: Install Go & Build Dependencies (DNF)
         run: |
           dnf install -y golang git make rpm-build
+          git config --global --add safe.directory "*"
           go version
 
       - name: Checkout repository
@@ -112,7 +113,10 @@ jobs:
       image: alpine:latest
     steps:
       - name: Install Build Dependencies (APK)
-        run: apk add --no-cache go git make
+        run: |
+          apk add --no-cache go git make
+          git config --global --add safe.directory "*"
+          go version
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -148,7 +152,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          go-version: 'stable'
           check-latest: true
           cache: false
 
@@ -174,7 +178,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          go-version: 'stable'
           check-latest: true
           cache: false
 
@@ -182,5 +186,6 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
 
 

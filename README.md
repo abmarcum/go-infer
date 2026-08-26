@@ -524,3 +524,10 @@ gomobile bind -target=ios -o GoInfer.xcframework ./pkg/engine ./pkg/server
 | `--tp-rank <n>` | `0` | Tensor parallelism rank of this worker |
 | `--tp-peers <s>` | `""` | Comma-separated peer URLs for AllReduce |
 
+---
+
+## 📄 License
+
+This project is licensed under the **MIT License** - see the [LICENSE](file:///Users/andrew/ai-workspace/code/go-infer/LICENSE) file for details.
+
+

@@ -343,3 +343,51 @@ func TestEngineMaxTokensCeiling(t *testing.T) {
 		t.Errorf("Generated tokens %d exceeded model SeqLen %d", stats.GeneratedTokens, eng.Config.SeqLen)
 	}
 }
+
+func TestEngineGenerateConsensus(t *testing.T) {
+	tmpDir := t.TempDir()
+	modelPath := createSyntheticGGUF(t, tmpDir)
+
+	eng, err := LoadModel(modelPath, 1)
+	if err != nil {
+		t.Fatalf("LoadModel failed: %v", err)
+	}
+	defer eng.Close()
+
+	params := sampler.Params{Temperature: 0.7, TopP: 0.9, TopK: 40}
+	consensus, stats, err := eng.GenerateConsensus("hello", 3, 4, params, nil)
+	if err != nil {
+		t.Fatalf("GenerateConsensus failed: %v", err)
+	}
+
+	if consensus.TotalSamples != 3 {
+		t.Errorf("Expected 3 samples, got %d", consensus.TotalSamples)
+	}
+	if len(consensus.AllCandidates) != 3 {
+		t.Errorf("Expected 3 candidates, got %d", len(consensus.AllCandidates))
+	}
+	if stats.GeneratedTokens == 0 {
+		t.Errorf("Expected generated tokens > 0, got %d", stats.GeneratedTokens)
+	}
+}
+
+func TestEngineGenerateWithTools(t *testing.T) {
+	tmpDir := t.TempDir()
+	modelPath := createSyntheticGGUF(t, tmpDir)
+
+	eng, err := LoadModel(modelPath, 1)
+	if err != nil {
+		t.Fatalf("LoadModel failed: %v", err)
+	}
+	defer eng.Close()
+
+	params := sampler.Params{Temperature: 0.0}
+	stats, err := eng.GenerateWithTools("hello", 3, params, true, nil)
+	if err != nil {
+		t.Fatalf("GenerateWithTools failed: %v", err)
+	}
+	if stats.GeneratedTokens == 0 {
+		t.Errorf("Expected generated tokens > 0")
+	}
+}
+

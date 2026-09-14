@@ -27,6 +27,7 @@ type LayerWeights struct {
 	FFNGateBuf, FFNUpBuf, FFNDownBuf    unsafe.Pointer
 	FFNGateType, FFNUpType, FFNDownType int
 	AttnNormBuf, FFNNormBuf             unsafe.Pointer
+	BQBuf, BKBuf, BVBuf                 unsafe.Pointer
 }
 
 type PreallocatedLayers struct {

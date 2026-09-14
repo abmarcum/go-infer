@@ -28,7 +28,8 @@ It parses GGUF binary files directly, executes quantized matrix math (`Q2_K` thr
 | Category | Highlights |
 | :--- | :--- |
 | **🚀 Compute & GPU Acceleration** | • **Apple Metal GPU Pipeline**: 8-way SIMD, fused Gate-Up SwiGLU, 100% VRAM residency<br>• **Pure Go CPU Fallback**: Multithreaded worker pool on Linux, Windows & iOS<br>• **Quantized Matrix Math**: Direct vector dot-products (`Q2_K`, `Q3_K`, `Q4_0`, `Q4_K`, `Q6_K`, `Q8_0`) |
-| **🧠 Memory & Context Optimization** | • **Prefix & Prompt Cache (Radix)**: Instant KV reuse dropping prefill latency to **~0 ms**<br>• **Quantized KV-Cache**: 8-bit & 4-bit attention storage cutting context RAM by **4×**<br>• **Paged KV Memory**: Block-table allocation eliminating memory fragmentation |
+| **🧠 Memory & Context Optimization** | • **Prefix & Prompt Cache (Radix)**: Instant KV reuse dropping prefill latency to **~0 ms**<br>• **Forkable & Branching KV**: Instant snapshotting and zero-cost branching for multi-path reasoning<br>• **Quantized KV-Cache**: 8-bit & 4-bit attention storage cutting context RAM by **4×**<br>• **Paged KV Memory**: Block-table allocation eliminating memory fragmentation |
+| **📐 Reasoning, Math & Test-Time Compute** | • **Self-Consistency (Best-of-N)**: Multi-chain majority consensus with LaTeX & GSM8K answer extraction<br>• **Program-Aided Reasoning (PAL)**: Embedded math evaluator & calculator tool loop eliminating arithmetic hallucinations<br>• **DeepSeek-R1 / CoT Support**: Native `<think>` stream parsing, reasoning hyperparameters, and grammar constraints |
 | **🛠️ Native APIs & Developer Tooling** | • **Hugging Face Downloader (`pull`)**: Stream models directly with auto-discovery<br>• **Embedded Dark-Mode Web UI**: Built-in streaming chat at `http://localhost:8080`<br>• **OpenAI & Ollama APIs**: SSE & NDJSON streaming endpoints with tool calling<br>• **JSON Grammar Mode**: Guaranteed valid JSON via logit masking<br>• **Embeddings API**: Dense vector extraction for RAG & vector databases<br>• **Prometheus Telemetry**: Real-time throughput & latency metrics (`/metrics`) |
 | **🌐 Multi-Server Distributed Scaling** | • **Distributed Speculative Decoding**: 2×–3× speedup over standard LAN/Wi-Fi<br>• **Pipeline Parallelism**: Split 70B–405B models across multiple nodes (1 hop/tok)<br>• **Tensor Parallelism**: Split matrix computation with AllReduce synchronization |
 | **📦 Deployment & Packaging** | • **Zero External Go Dependencies**: Standard library only (no CGo on Linux/Windows)<br>• **Docker & Compose**: Hardened, unprivileged container images with health checks<br>• **Linux Distribution Packages**: Native Debian (`.deb`) and Red Hat (`.rpm`) installers |
@@ -78,6 +79,7 @@ go-infer/
 │   ├── distributed/              # Pipeline Parallelism, Tensor Parallelism & Speculative Decoding
 │   ├── tokenizer/                # BPE tokenizer & merge evaluation
 │   ├── engine/                   # Transformer forward pass, Prefix Cache, Paged KV & Embeddings
+│   ├── reasoning/                # Self-consistency consensus, math parser/evaluator, CoT thinking & tool loop
 │   ├── sampler/                  # Sampler & JSON grammar constraint masking
 │   └── server/                   # HTTP Server (OpenAI, Ollama, Web UI, Metrics)
 │       └── web/
@@ -263,21 +265,25 @@ Download any GGUF model directly from Hugging Face Hub with live streaming progr
 ```
 
 ### 2. Direct CLI Prompt Completion
-Run inference directly against any GGUF file or Ollama model blob:
+Run inference directly against any GGUF file, or pass an installed Ollama model tag (e.g. `qwen3.6:27b`, `llama3.2`) which is auto-resolved from your local Ollama library:
 ```bash
-./goinfer models/llama-3.2-1b-instruct.Q4_K_M.gguf "Explain goroutines in Go in two sentences."
+# Using a local GGUF file
+./go-infer models/llama-3.2-1b-instruct.Q4_K_M.gguf "Explain goroutines in Go in two sentences."
+
+# Or directly using an installed Ollama model tag!
+./go-infer qwen3.6:27b "Explain quantum entanglement in simple terms."
 ```
 
 ### 3. Interactive REPL Chat
 Omit the prompt argument to start interactive multi-turn chat with automatic prompt template detection (LLaMA 3 / ChatML):
 ```bash
-./goinfer models/llama-3.2-1b-instruct.Q4_K_M.gguf
+./go-infer qwen3.6:27b
 ```
 
 ### 4. HTTP Server with Embedded Web Chat UI & OpenAI / Ollama API
 Launch the unified server on port 8080:
 ```bash
-./goinfer --serve :8080 models/llama-3.2-1b-instruct.Q4_K_M.gguf
+./go-infer --serve :8080 qwen3.6:27b
 ```
 
 #### A. Embedded Dark-Mode Web UI
@@ -330,6 +336,60 @@ curl http://localhost:8080/api/generate \
     "model": "default",
     "prompt": "Why is the sky blue?",
     "stream": true
+  }'
+```
+
+### 5. Advanced Reasoning, Mathematics & Test-Time Compute
+
+`go-infer` includes dedicated inference-time compute algorithms and embedded tools designed to dramatically increase accuracy on challenging logic, science, and math benchmarks (e.g. GSM8K, MATH).
+
+#### A. Self-Consistency / Best-of-$N$ Majority Voting (`--best-of-n`)
+Generates $N$ independent candidate reasoning chains from a single prefilled prompt KV-cache (using zero-cost KV cache branching), extracts LaTeX `\boxed{...}` or numeric answers, and returns the voted majority consensus with confidence scoring:
+
+```bash
+./goinfer --best-of-n 5 models/deepseek-r1-distill-qwen-1.5b.gguf \
+  "Janet’s ducks lay 16 eggs per day. She eats three for breakfast and bakes muffins with four. She sells the remainder at the farmers' market for $2 per egg. How much in dollars does she make daily?"
+```
+
+```
+--- Self-Consistency Voting (5 paths) ---
+>>> Candidate 1:
+Answer: She sells 9 eggs at $2 each, making \boxed{18}. (Extracted: 18)
+...
+═════════════════════════════════════════════════════
+🏆 Consensus Majority Answer: 18
+📊 Confidence: 100.0% (5/5 votes)
+⚡ Throughput: 74.20 tok/s across 612 tokens
+═════════════════════════════════════════════════════
+```
+
+#### B. Embedded Math Evaluator & Calculator Tool Loop (`--calc`)
+Eliminates arithmetic hallucinations by running a pure Go recursive-descent math engine directly inside the inference loop. Whenever the model writes ```calc\n<expr>\n``` or `<<calc: <expr>>>`, `go-infer` calculates the exact numerical answer and injects the verified result back into the model's KV context:
+
+```bash
+./goinfer --calc models/llama-3.2-1b-instruct.Q4_K_M.gguf \
+  "What is 3^7 * sqrt(144) - 250?"
+```
+
+#### C. DeepSeek-R1 / Chain-of-Thought Reasoning Mode (`--reasoning`)
+Optimizes hyperparameters for reasoning models ($T=0.6$, $\text{TopP}=0.95$, $\text{RepPenalty}=1.0$), prevents mathematical formula distortion, and cleanly separates internal `<think>...</think>` scratchpad traces from final answers:
+
+```bash
+./goinfer --reasoning models/deepseek-r1-distill-qwen-1.5b.gguf \
+  "Prove that the square root of 2 is irrational."
+```
+
+#### D. OpenAI API Multi-Sample & Reasoning Content
+Send standard OpenAI completions with `best_of_n` or `n` to trigger consensus voting, and receive `reasoning_content` in responses:
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-r1",
+    "messages": [{"role": "user", "content": "Compute 15! / (10! * 5!)."}],
+    "best_of_n": 3,
+    "reasoning_effort": "high"
   }'
 ```
 

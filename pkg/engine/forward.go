@@ -54,6 +54,8 @@ func (e *Engine) Forward(token int, pos int, kv *KVCache) []float32 {
 		}
 		if err := metal.ForwardTransformer(&tp); err == nil {
 			return a.Logits
+		} else {
+			fmt.Printf("ForwardTransformer err: %v\n", err)
 		}
 	}
 
@@ -132,6 +134,23 @@ func (e *Engine) Forward(token int, pos int, kv *KVCache) []float32 {
 		w.MatMul(e.GEMV, a.Q, a.XB, fmt.Sprintf("blk.%d.attn_q.weight", l), cfg.Dim, cfg.Dim)
 		w.MatMul(e.GEMV, a.K, a.XB, fmt.Sprintf("blk.%d.attn_k.weight", l), kvDim, cfg.Dim)
 		w.MatMul(e.GEMV, a.V, a.XB, fmt.Sprintf("blk.%d.attn_v.weight", l), kvDim, cfg.Dim)
+
+		// Add Q, K, V biases if present (e.g. Qwen 2 / 2.5)
+		if bq := w.Get1DBias(fmt.Sprintf("blk.%d.attn_q.bias", l)); bq != nil {
+			for i, b := range bq {
+				a.Q[i] += b
+			}
+		}
+		if bk := w.Get1DBias(fmt.Sprintf("blk.%d.attn_k.bias", l)); bk != nil {
+			for i, b := range bk {
+				a.K[i] += b
+			}
+		}
+		if bv := w.Get1DBias(fmt.Sprintf("blk.%d.attn_v.bias", l)); bv != nil {
+			for i, b := range bv {
+				a.V[i] += b
+			}
+		}
 
 		// Apply RoPE
 		for h := 0; h < cfg.NumHeads; h++ {
@@ -265,6 +284,32 @@ func (e *Engine) ForwardBatch(tokens []int, kv *KVCache) []float32 {
 		if !w.MatMulBatch(batchV, batchXB, fmt.Sprintf("blk.%d.attn_v.weight", l), batchSize, kvDim, cfg.Dim) {
 			for b := 0; b < batchSize; b++ {
 				w.MatMul(e.GEMV, batchV[b*kvDim:(b+1)*kvDim], batchXB[b*cfg.Dim:(b+1)*cfg.Dim], fmt.Sprintf("blk.%d.attn_v.weight", l), kvDim, cfg.Dim)
+			}
+		}
+
+		// Add Q, K, V biases if present (e.g. Qwen 2 / 2.5)
+		if bq := w.Get1DBias(fmt.Sprintf("blk.%d.attn_q.bias", l)); bq != nil {
+			for b := 0; b < batchSize; b++ {
+				qBase := b * cfg.Dim
+				for i, v := range bq {
+					batchQ[qBase+i] += v
+				}
+			}
+		}
+		if bk := w.Get1DBias(fmt.Sprintf("blk.%d.attn_k.bias", l)); bk != nil {
+			for b := 0; b < batchSize; b++ {
+				kBase := b * kvDim
+				for i, v := range bk {
+					batchK[kBase+i] += v
+				}
+			}
+		}
+		if bv := w.Get1DBias(fmt.Sprintf("blk.%d.attn_v.bias", l)); bv != nil {
+			for b := 0; b < batchSize; b++ {
+				vBase := b * kvDim
+				for i, v := range bv {
+					batchV[vBase+i] += v
+				}
 			}
 		}
 

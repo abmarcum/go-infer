@@ -11,6 +11,7 @@ package metal
 import "C"
 import (
 	"fmt"
+	"os"
 	"sync"
 	"unsafe"
 )
@@ -34,6 +35,9 @@ func Init() error {
 
 // IsAvailable returns true if Metal GPU acceleration is initialized and available.
 func IsAvailable() bool {
+	if os.Getenv("DISABLE_METAL") == "1" {
+		return false
+	}
 	return bool(C.metal_is_available())
 }
 
@@ -69,6 +73,7 @@ type LayerWeights struct {
 	FFNGateBuf, FFNUpBuf, FFNDownBuf    unsafe.Pointer
 	FFNGateType, FFNUpType, FFNDownType int
 	AttnNormBuf, FFNNormBuf             unsafe.Pointer
+	BQBuf, BKBuf, BVBuf                 unsafe.Pointer
 }
 
 // PreallocatedLayers stores a C-pinned array of layer weight handles to eliminate runtime allocations.
@@ -104,6 +109,10 @@ func NewPreallocatedLayers(layers []LayerWeights) *PreallocatedLayers {
 
 		cSlice[i].attn_norm = C.metal_buffer_t(l.AttnNormBuf)
 		cSlice[i].ffn_norm = C.metal_buffer_t(l.FFNNormBuf)
+
+		cSlice[i].bq = C.metal_buffer_t(l.BQBuf)
+		cSlice[i].bk = C.metal_buffer_t(l.BKBuf)
+		cSlice[i].bv = C.metal_buffer_t(l.BVBuf)
 	}
 	return &PreallocatedLayers{ptr: cPtr, len: len(layers)}
 }
@@ -163,6 +172,10 @@ func ForwardTransformer(p *TransformerParams) error {
 
 			cSlice[i].attn_norm = C.metal_buffer_t(l.AttnNormBuf)
 			cSlice[i].ffn_norm = C.metal_buffer_t(l.FFNNormBuf)
+
+			cSlice[i].bq = C.metal_buffer_t(l.BQBuf)
+			cSlice[i].bk = C.metal_buffer_t(l.BKBuf)
+			cSlice[i].bv = C.metal_buffer_t(l.BVBuf)
 		}
 		layersPtr = &cLayers[0]
 	} else {

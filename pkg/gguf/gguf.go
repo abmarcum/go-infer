@@ -375,3 +375,18 @@ func GetMetadataStringArray(m map[string]interface{}, key string) []string {
 	}
 	return res
 }
+
+func GetMetadataBool(m map[string]interface{}, key string, def bool) bool {
+	if v, ok := m[key]; ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+		if u, ok := v.(uint8); ok {
+			return u != 0
+		}
+		if u, ok := v.(uint32); ok {
+			return u != 0
+		}
+	}
+	return def
+}

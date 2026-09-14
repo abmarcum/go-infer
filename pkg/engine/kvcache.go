@@ -143,3 +143,70 @@ func (c *KVCache) Get(layer, slot int) ([]float32, []float32) {
 		return c.Key[layer][offset : offset+c.KVDim], c.Value[layer][offset : offset+c.KVDim]
 	}
 }
+
+// Clone returns an independent deep copy of the KV cache with identical state and capacity.
+func (c *KVCache) Clone() *KVCache {
+	if c == nil {
+		return nil
+	}
+	return c.ForkAt(c.MaxSeq)
+}
+
+// ForkAt returns an independent deep copy of the KV cache with keys and values preserved up to maxSlot.
+func (c *KVCache) ForkAt(maxSlot int) *KVCache {
+	if c == nil {
+		return nil
+	}
+	numLayers := len(c.Key)
+	if numLayers == 0 {
+		numLayers = len(c.KeyQ8)
+	}
+	if numLayers == 0 {
+		numLayers = len(c.KeyQ4)
+	}
+
+	clone := NewQuantizedKVCache(numLayers, c.MaxSeq, c.KVDim, c.Type)
+	clone.CurPos = c.CurPos
+
+	if maxSlot > c.MaxSeq {
+		maxSlot = c.MaxSeq
+	}
+	if maxSlot < 0 {
+		maxSlot = 0
+	}
+
+	switch c.Type {
+	case KVTypeQ8_0:
+		bytesPerVec := ((c.KVDim + 31) / 32) * 34
+		copyLen := maxSlot * bytesPerVec
+		for l := 0; l < numLayers; l++ {
+			if copyLen > len(c.KeyQ8[l]) {
+				copyLen = len(c.KeyQ8[l])
+			}
+			copy(clone.KeyQ8[l][:copyLen], c.KeyQ8[l][:copyLen])
+			copy(clone.ValueQ8[l][:copyLen], c.ValueQ8[l][:copyLen])
+		}
+	case KVTypeQ4_0:
+		bytesPerVec := ((c.KVDim + 31) / 32) * 18
+		copyLen := maxSlot * bytesPerVec
+		for l := 0; l < numLayers; l++ {
+			if copyLen > len(c.KeyQ4[l]) {
+				copyLen = len(c.KeyQ4[l])
+			}
+			copy(clone.KeyQ4[l][:copyLen], c.KeyQ4[l][:copyLen])
+			copy(clone.ValueQ4[l][:copyLen], c.ValueQ4[l][:copyLen])
+		}
+	default:
+		copyLen := maxSlot * c.KVDim
+		for l := 0; l < numLayers; l++ {
+			if copyLen > len(c.Key[l]) {
+				copyLen = len(c.Key[l])
+			}
+			copy(clone.Key[l][:copyLen], c.Key[l][:copyLen])
+			copy(clone.Value[l][:copyLen], c.Value[l][:copyLen])
+		}
+	}
+
+	return clone
+}
+

@@ -9,13 +9,14 @@ import (
 
 // Params holds sampling hyperparameters.
 type Params struct {
-	Temperature   float32
-	TopP          float32
-	TopK          int
-	RepPenalty    float32
-	Rand          *rand.Rand
-	JSONValidator *GrammarValidator
-	Vocab         []string
+	Temperature        float32
+	TopP               float32
+	TopK               int
+	RepPenalty         float32
+	Rand               *rand.Rand
+	JSONValidator      *GrammarValidator
+	ReasoningValidator *ReasoningGrammarValidator
+	Vocab              []string
 }
 
 // DefaultParams returns balanced standard sampling configuration.
@@ -39,6 +40,12 @@ func SampleToken(logits []float32, history []int, params Params) int {
 	if params.JSONValidator != nil && len(params.Vocab) > 0 {
 		ApplyJSONGrammarMask(logits, params.Vocab, params.JSONValidator)
 	}
+
+	// 0b. Optional Reasoning (<think>...</think>) Grammar Masking
+	if params.ReasoningValidator != nil && len(params.Vocab) > 0 {
+		ApplyReasoningGrammarMask(logits, params.Vocab, params.ReasoningValidator)
+	}
+
 
 	// 1. Repetition Penalty
 	if params.RepPenalty != 1.0 && params.RepPenalty > 0 && len(history) > 0 {

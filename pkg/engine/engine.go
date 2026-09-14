@@ -5,8 +5,10 @@ import (
 	"go-inference/pkg/gguf"
 	"go-inference/pkg/math"
 	"go-inference/pkg/metal"
+	"go-inference/pkg/reasoning"
 	"go-inference/pkg/sampler"
 	"go-inference/pkg/tokenizer"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +69,12 @@ func LoadModel(filePath string, numThreads int) (*Engine, error) {
 
 	arch := gguf.GetMetadataString(meta, "general.architecture", "llama")
 
+	// Detect unsupported State Space Model (SSM / Mamba hybrid) architectures
+	if arch == "qwen35" || arch == "mamba" || arch == "rwkv" {
+		reader.Close()
+		return nil, fmt.Errorf("architecture '%s' is a State Space Model (Mamba/SSM hybrid) which uses recurrent state-space layers rather than standard Transformer attention. go-infer accelerates dense Transformer architectures (LLaMA 3/3.1/3.2, Qwen 2/2.5, DeepSeek-R1, Mistral, Gemma, Phi). For Qwen, please use dense Transformer models such as qwen2.5:14b, qwen2.5:32b, or deepseek-r1-distill-qwen", arch)
+	}
+
 	// Extract Hyperparameters dynamically based on architecture prefix
 	getParamUint := func(suffix string, def uint64) uint64 {
 		if v := gguf.GetMetadataUint(meta, fmt.Sprintf("%s.%s", arch, suffix), 0); v > 0 {
@@ -110,6 +118,14 @@ func LoadModel(filePath string, numThreads int) (*Engine, error) {
 
 	tok := tokenizer.NewTokenizer(vocab, merges, bosID, eosID)
 
+	addBOS := gguf.GetMetadataBool(meta, "tokenizer.ggml.add_bos_token", false)
+
+	// Cap default active sequence length to 8192 tokens to prevent multi-gigabyte VRAM/RAM exhaustion on 128k+ models
+	activeSeqLen := seqLen
+	if activeSeqLen <= 0 || activeSeqLen > 8192 {
+		activeSeqLen = 8192
+	}
+
 	cfg := ModelConfig{
 		Dim:        dim,
 		HiddenDim:  hiddenDim,
@@ -117,12 +133,13 @@ func LoadModel(filePath string, numThreads int) (*Engine, error) {
 		NumHeads:   numHeads,
 		NumKVHeads: numKVHeads,
 		VocabSize:  vocabSize,
-		SeqLen:     seqLen,
+		SeqLen:     activeSeqLen,
 		RopeTheta:  ropeTheta,
 		Eps:        eps,
 		BosID:      bosID,
 		EosID:      eosID,
 		EotID:      tok.EotTokenID,
+		AddBOS:     addBOS,
 	}
 
 	// Try initializing Apple Metal GPU on macOS
@@ -135,6 +152,12 @@ func LoadModel(filePath string, numThreads int) (*Engine, error) {
 	if err != nil {
 		reader.Close()
 		return nil, fmt.Errorf("load weights: %w", err)
+	}
+
+	if _, ok := weights.ResolveTensorName("blk.0.attn_q.weight"); !ok {
+		weights.Close()
+		reader.Close()
+		return nil, fmt.Errorf("model is missing standard attention projection weights ('blk.0.attn_q.weight'); architecture '%s' is not supported", arch)
 	}
 
 	arena := NewMemoryArena(cfg)
@@ -157,6 +180,10 @@ func LoadModel(filePath string, numThreads int) (*Engine, error) {
 			attnNormName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_norm.weight", l))
 			ffnNormName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ffn_norm.weight", l))
 
+			bqName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_q.bias", l))
+			bkName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_k.bias", l))
+			bvName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_v.bias", l))
+
 			metalLayers[l] = metal.LayerWeights{
 				WQBuf:       weights.GPUBufs[wqName],
 				WQType:      int(weights.Meta[wqName].Type),
@@ -174,6 +201,9 @@ func LoadModel(filePath string, numThreads int) (*Engine, error) {
 				FFNDownType: int(weights.Meta[downName].Type),
 				AttnNormBuf: weights.GPUBufs[attnNormName],
 				FFNNormBuf:  weights.GPUBufs[ffnNormName],
+				BQBuf:       weights.GPUBufs[bqName],
+				BKBuf:       weights.GPUBufs[bkName],
+				BVBuf:       weights.GPUBufs[bvName],
 			}
 		}
 
@@ -237,10 +267,15 @@ type GenerateStats struct {
 
 // Generate executes autoregressive generation for a text prompt.
 func (e *Engine) Generate(prompt string, maxTokens int, params sampler.Params, onToken func(token string) bool) (*GenerateStats, error) {
+	return e.GenerateWithTools(prompt, maxTokens, params, false, onToken)
+}
+
+// GenerateWithTools executes autoregressive generation with optional inline calculator evaluation.
+func (e *Engine) GenerateWithTools(prompt string, maxTokens int, params sampler.Params, enableCalc bool, onToken func(token string) bool) (*GenerateStats, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	tokens := e.Tokenizer.Encode(prompt, true)
+	tokens := e.Tokenizer.Encode(prompt, e.Config.AddBOS)
 	if len(tokens) == 0 {
 		return nil, fmt.Errorf("prompt produced 0 tokens")
 	}
@@ -265,6 +300,9 @@ func (e *Engine) Generate(prompt string, maxTokens int, params sampler.Params, o
 	if params.JSONValidator != nil && len(params.Vocab) == 0 {
 		params.Vocab = e.Tokenizer.Vocab
 	}
+	if params.ReasoningValidator != nil && len(params.Vocab) == 0 {
+		params.Vocab = e.Tokenizer.Vocab
+	}
 
 	// 1. Check Prefix / Prompt KV-Cache for instant reuse
 	var kv *KVCache
@@ -284,16 +322,19 @@ func (e *Engine) Generate(prompt string, maxTokens int, params sampler.Params, o
 	}
 
 	// 2. Prefill remaining uncached prompt tokens
+	var logits []float32
 	if pos < len(tokens) {
-		if pos == 0 && len(tokens) > 1 {
-			e.ForwardBatch(tokens, kv)
+		if !metal.IsAvailable() && pos == 0 && len(tokens) > 1 {
+			logits = e.ForwardBatch(tokens, kv)
 			pos = len(tokens)
 		} else {
 			for pos < len(tokens) {
-				e.Forward(tokens[pos], pos, kv)
+				logits = e.Forward(tokens[pos], pos, kv)
 				pos++
 			}
 		}
+	} else if len(tokens) > 0 {
+		logits = e.Forward(tokens[len(tokens)-1], len(tokens)-1, kv)
 	}
 	prefillDur := time.Since(startPrefill)
 
@@ -303,19 +344,17 @@ func (e *Engine) Generate(prompt string, maxTokens int, params sampler.Params, o
 	}
 
 	history := append([]int{}, tokens...)
-	curTok := tokens[len(tokens)-1]
 
 	// 2. Generation loop
 	startGen := time.Now()
 	genTokens := 0
+	var recentBuffer strings.Builder
 
 	for i := 0; i < maxTokens; i++ {
-		logits := e.Forward(curTok, pos, kv)
 		next := sampler.SampleToken(logits, history, params)
-		pos++
 		genTokens++
 
-		if next == e.Config.EosID || next == e.Config.EotID {
+		if e.isStopToken(next) {
 			break
 		}
 
@@ -328,7 +367,66 @@ func (e *Engine) Generate(prompt string, maxTokens int, params sampler.Params, o
 		}
 
 		history = append(history, next)
-		curTok = next
+
+		// 3. Inline Calculator Execution if enabled
+		if enableCalc {
+			recentBuffer.WriteString(piece)
+			bufStr := recentBuffer.String()
+
+			// Check for ```calc\n...\n```
+			if (strings.Contains(bufStr, "```calc\n") || strings.Contains(bufStr, "```math\n")) && strings.HasSuffix(bufStr, "\n```") {
+				startTag := "```calc\n"
+				if !strings.Contains(bufStr, startTag) {
+					startTag = "```math\n"
+				}
+				sIdx := strings.Index(bufStr, startTag) + len(startTag)
+				eIdx := len(bufStr) - len("\n```")
+				if eIdx > sIdx {
+					expr := strings.TrimSpace(bufStr[sIdx:eIdx])
+					if val, err := reasoning.ExecuteMathTool(expr); err == nil {
+						inject := fmt.Sprintf("\n--> result: %s\n```\n", val)
+						if onToken != nil {
+							onToken(inject)
+						}
+						injectTokens := e.Tokenizer.Encode(inject, false)
+						for _, it := range injectTokens {
+							logits = e.Forward(it, pos, kv)
+							pos++
+							history = append(history, it)
+						}
+						recentBuffer.Reset()
+						continue
+					}
+				}
+				recentBuffer.Reset()
+			} else if strings.Contains(bufStr, "<<calc:") && strings.HasSuffix(bufStr, ">>") {
+				sIdx := strings.Index(bufStr, "<<calc:") + len("<<calc:")
+				eIdx := len(bufStr) - len(">>")
+				if eIdx > sIdx {
+					expr := strings.TrimSpace(bufStr[sIdx:eIdx])
+					if !strings.Contains(expr, "=") {
+						if val, err := reasoning.ExecuteMathTool(expr); err == nil {
+							inject := fmt.Sprintf(" = %s>>", val)
+							if onToken != nil {
+								onToken(inject)
+							}
+							injectTokens := e.Tokenizer.Encode(inject, false)
+							for _, it := range injectTokens {
+								logits = e.Forward(it, pos, kv)
+								pos++
+								history = append(history, it)
+							}
+							recentBuffer.Reset()
+							continue
+						}
+					}
+				}
+				recentBuffer.Reset()
+			}
+		}
+
+		logits = e.Forward(next, pos, kv)
+		pos++
 	}
 	genDur := time.Since(startGen)
 
@@ -346,11 +444,205 @@ func (e *Engine) Generate(prompt string, maxTokens int, params sampler.Params, o
 	}, nil
 }
 
-// FormatChat formats messages according to standard LLaMA 3 or ChatML prompt templates.
+// GenerateConsensus runs self-consistency majority voting across numSamples parallel branches.
+func (e *Engine) GenerateConsensus(prompt string, numSamples int, maxTokens int, params sampler.Params, onCandidate func(cand *reasoning.CandidateAnswer)) (*reasoning.ConsensusResult, *GenerateStats, error) {
+	return e.GenerateConsensusWithStream(prompt, numSamples, maxTokens, params, nil, onCandidate)
+}
+
+// GenerateConsensusWithStream runs self-consistency majority voting with real-time candidate token streaming.
+func (e *Engine) GenerateConsensusWithStream(prompt string, numSamples int, maxTokens int, params sampler.Params, onToken func(sampleIdx int, piece string), onCandidate func(cand *reasoning.CandidateAnswer)) (*reasoning.ConsensusResult, *GenerateStats, error) {
+	if numSamples <= 1 {
+		numSamples = 3
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	tokens := e.Tokenizer.Encode(prompt, e.Config.AddBOS)
+	if len(tokens) == 0 {
+		return nil, nil, fmt.Errorf("prompt produced 0 tokens")
+	}
+
+	if len(tokens) >= e.Config.SeqLen {
+		tokens = tokens[len(tokens)-e.Config.SeqLen+1:]
+	}
+
+	if maxTokens <= 0 {
+		maxTokens = 512
+	}
+	if maxTokens > e.Config.SeqLen-len(tokens) {
+		maxTokens = e.Config.SeqLen - len(tokens)
+		if maxTokens <= 0 {
+			maxTokens = 1
+		}
+	}
+
+	// 1. Prefill prompt once
+	startPrefill := time.Now()
+	var baseKV *KVCache
+	pos := 0
+
+	if e.PrefixCache != nil {
+		matchedLen, cachedKV := e.PrefixCache.FindLongestPrefix(tokens)
+		if matchedLen > 0 && cachedKV != nil {
+			baseKV = cachedKV
+			pos = matchedLen
+		}
+	}
+
+	if baseKV == nil {
+		baseKV = e.NewKVCache()
+	}
+
+	var baseLogits []float32
+	if pos < len(tokens) {
+		if !metal.IsAvailable() && pos == 0 && len(tokens) > 1 {
+			baseLogits = e.ForwardBatch(tokens, baseKV)
+			pos = len(tokens)
+		} else {
+			for pos < len(tokens) {
+				baseLogits = e.Forward(tokens[pos], pos, baseKV)
+				pos++
+			}
+		}
+	} else if len(tokens) > 0 {
+		baseLogits = e.Forward(tokens[len(tokens)-1], len(tokens)-1, baseKV)
+	}
+	prefillDur := time.Since(startPrefill)
+
+	// Save a detached copy of baseLogits so Forward() in sampling loop doesn't mutate it
+	savedBaseLogits := make([]float32, len(baseLogits))
+	copy(savedBaseLogits, baseLogits)
+
+	if e.PrefixCache != nil {
+		e.PrefixCache.Store(tokens, baseKV)
+	}
+
+	// 2. Sample independent branches using cloned KV-cache states
+	startGen := time.Now()
+	totalGenTokens := 0
+	candidates := make([]reasoning.CandidateAnswer, numSamples)
+
+	for s := 0; s < numSamples; s++ {
+		sampleKV := baseKV.Clone()
+		sampleParams := params
+		sampleParams.Rand = rand.New(rand.NewSource(time.Now().UnixNano() + int64(s*10007)))
+
+		history := append([]int{}, tokens...)
+		samplePos := len(tokens)
+		logits := make([]float32, len(savedBaseLogits))
+		copy(logits, savedBaseLogits)
+
+		var outputBuilder strings.Builder
+
+		for i := 0; i < maxTokens; i++ {
+			next := sampler.SampleToken(logits, history, sampleParams)
+			samplePos++
+			totalGenTokens++
+
+			if e.isStopToken(next) {
+				break
+			}
+
+			piece := e.Tokenizer.Decode([]int{next})
+			outputBuilder.WriteString(piece)
+			if onToken != nil {
+				onToken(s, piece)
+			}
+
+			history = append(history, next)
+			logits = e.Forward(next, samplePos-1, sampleKV)
+		}
+
+		fullText := outputBuilder.String()
+		thinking, answer := reasoning.ExtractThinking(fullText)
+		rawAnswer := reasoning.ExtractAnswer(answer)
+		if rawAnswer == "" {
+			rawAnswer = reasoning.ExtractAnswer(fullText)
+		}
+
+		cand := reasoning.CandidateAnswer{
+			Index:      s,
+			RawAnswer:  rawAnswer,
+			NormAnswer: reasoning.NormalizeAnswer(rawAnswer),
+			Thinking:   thinking,
+			FullOutput: fullText,
+		}
+		candidates[s] = cand
+		if onCandidate != nil {
+			onCandidate(&cand)
+		}
+	}
+
+	genDur := time.Since(startGen)
+	tps := 0.0
+	if genDur.Seconds() > 0 {
+		tps = float64(totalGenTokens) / genDur.Seconds()
+	}
+
+	consensus := reasoning.EvaluateConsensus(candidates)
+	stats := &GenerateStats{
+		PromptTokens:     len(tokens),
+		GeneratedTokens:  totalGenTokens,
+		PrefillDuration:  prefillDur,
+		GenerateDuration: genDur,
+		TokensPerSecond:  tps,
+	}
+
+	return consensus, stats, nil
+}
+
+func (e *Engine) isStopToken(tok int) bool {
+	if tok == e.Config.EosID || tok == e.Config.EotID {
+		return true
+	}
+	if e.Tokenizer != nil {
+		if id, ok := e.Tokenizer.TokenToID["<|im_end|>"]; ok && tok == id {
+			return true
+		}
+		if id, ok := e.Tokenizer.TokenToID["<|endoftext|>"]; ok && tok == id {
+			return true
+		}
+		if id, ok := e.Tokenizer.TokenToID["<|eot_id|>"]; ok && tok == id {
+			return true
+		}
+		if id, ok := e.Tokenizer.TokenToID["<｜end▁of▁sentence｜>"]; ok && tok == id {
+			return true
+		}
+		if id, ok := e.Tokenizer.TokenToID["<｜User｜>"]; ok && tok == id {
+			return true
+		}
+		if id, ok := e.Tokenizer.TokenToID["<｜Assistant｜>"]; ok && tok == id {
+			return true
+		}
+		if id, ok := e.Tokenizer.TokenToID["<｜begin▁of▁sentence｜>"]; ok && tok == id {
+			return true
+		}
+	}
+	return false
+}
+
+// FormatChat formats messages according to standard LLaMA 3, DeepSeek, or ChatML prompt templates.
 func (e *Engine) FormatChat(messages []ChatMessage) string {
 	var sb strings.Builder
-	// Check if vocabulary has LLaMA 3 special tokens
-	isLlama3 := e.Tokenizer.EotTokenID != e.Tokenizer.EosTokenID
+
+	// 1. Check DeepSeek R1 / V3
+	if _, hasDeepSeek := e.Tokenizer.TokenToID["<｜User｜>"]; hasDeepSeek {
+		for _, m := range messages {
+			if m.Role == "user" {
+				sb.WriteString(fmt.Sprintf("<｜User｜>%s\n", strings.TrimSpace(m.Content)))
+			} else if m.Role == "assistant" {
+				sb.WriteString(fmt.Sprintf("<｜Assistant｜>%s<｜end▁of▁sentence｜>\n", strings.TrimSpace(m.Content)))
+			}
+		}
+		sb.WriteString("<｜Assistant｜>\n<think>\n")
+		return sb.String()
+	}
+
+	// 2. Check LLaMA 3
+	_, hasLlamaHeader := e.Tokenizer.TokenToID["<|start_header_id|>"]
+	_, hasChatML := e.Tokenizer.TokenToID["<|im_start|>"]
+	isLlama3 := hasLlamaHeader || (!hasChatML && e.Tokenizer.EotTokenID != e.Tokenizer.EosTokenID)
 
 	if isLlama3 {
 		for _, m := range messages {
@@ -358,7 +650,7 @@ func (e *Engine) FormatChat(messages []ChatMessage) string {
 		}
 		sb.WriteString("<|start_header_id|>assistant<|end_header_id|>\n\n")
 	} else {
-		// ChatML fallback
+		// 3. ChatML fallback (Qwen, Yi, etc.)
 		for _, m := range messages {
 			sb.WriteString(fmt.Sprintf("<|im_start|>%s\n%s<|im_end|>\n", m.Role, strings.TrimSpace(m.Content)))
 		}

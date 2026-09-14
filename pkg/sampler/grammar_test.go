@@ -50,3 +50,39 @@ func TestApplyJSONGrammarMask(t *testing.T) {
 		t.Errorf("Expected 'hello' (index 1) to be masked out at start of JSON, got logit %f", logits[1])
 	}
 }
+
+func TestReasoningGrammarValidator(t *testing.T) {
+	rv := NewReasoningGrammarValidator(10)
+
+	// Must accept starting <think>
+	if !rv.Accepts("<think>") {
+		t.Errorf("Expected <think> to be accepted at start")
+	}
+	rv.Process("<think>")
+
+	// Must not allow premature </think> before minThinkLen
+	if rv.Accepts("</think>") {
+		t.Errorf("Expected premature </think> to be rejected before minThinkLen")
+	}
+
+	// Supply reasoning characters
+	rv.Process("Let us break down the problem step by step. First, calculate 5 * 10.")
+
+	// Now </think> should be accepted
+	if !rv.Accepts("</think>") {
+		t.Errorf("Expected </think> to be accepted after sufficient reasoning")
+	}
+	rv.Process("</think>")
+
+	// Now solution phase
+	if !rv.Accepts("The answer is 50.") {
+		t.Errorf("Expected answer to be accepted after </think>")
+	}
+	rv.Process("The answer is 50.")
+
+	// Cannot start thinking again
+	if rv.Accepts("<think>") {
+		t.Errorf("Should not allow opening another <think> inside answer phase")
+	}
+}
+

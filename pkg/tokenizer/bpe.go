@@ -4,7 +4,35 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+var (
+	byteToUnicode [256]string
+	unicodeToByte map[rune]byte
+	gpt2Once      sync.Once
+)
+
+func initGPT2ByteMap() {
+	unicodeToByte = make(map[rune]byte, 256)
+	isDirect := func(b int) bool {
+		return (b >= int('!') && b <= int('~')) || (b >= 0xA1 && b <= 0xAC) || (b >= 0xAE && b <= 0xFF)
+	}
+
+	n := 0
+	for b := 0; b < 256; b++ {
+		if isDirect(b) {
+			r := rune(b)
+			byteToUnicode[b] = string(r)
+			unicodeToByte[r] = byte(b)
+		} else {
+			r := rune(256 + n)
+			byteToUnicode[b] = string(r)
+			unicodeToByte[r] = byte(b)
+			n++
+		}
+	}
+}
 
 // Tokenizer implements a Byte-Pair Encoding (BPE) tokenizer compatible with GGUF models.
 type Tokenizer struct {
@@ -17,10 +45,13 @@ type Tokenizer struct {
 	EotTokenID    int
 	SpecialTokens map[string]int
 	ByteFallback  bool
+	IsByteBPE     bool
 }
 
 // NewTokenizer constructs a Tokenizer instance from vocabulary and merge rules.
 func NewTokenizer(vocab []string, merges []string, bosID, eosID int) *Tokenizer {
+	gpt2Once.Do(initGPT2ByteMap)
+
 	t2i := make(map[string]int, len(vocab))
 	special := make(map[string]int)
 
@@ -47,6 +78,18 @@ func NewTokenizer(vocab []string, merges []string, bosID, eosID int) *Tokenizer 
 		eotID = eosID
 	}
 
+	isByteBPE := false
+	checkLen := len(vocab)
+	if checkLen > 1000 {
+		checkLen = 1000
+	}
+	for _, v := range vocab[:checkLen] {
+		if strings.Contains(v, "Ġ") || strings.Contains(v, "Ċ") {
+			isByteBPE = true
+			break
+		}
+	}
+
 	return &Tokenizer{
 		Vocab:         vocab,
 		TokenToID:     t2i,
@@ -56,6 +99,7 @@ func NewTokenizer(vocab []string, merges []string, bosID, eosID int) *Tokenizer 
 		EotTokenID:    eotID,
 		SpecialTokens: special,
 		ByteFallback:  true,
+		IsByteBPE:     isByteBPE,
 	}
 }
 
@@ -132,18 +176,33 @@ func (t *Tokenizer) encodeSegment(text string) []int {
 	}
 
 	var tokens []int
-	// Initial tokenization at byte level or individual characters
-	for i := 0; i < len(text); i++ {
-		b := text[i : i+1]
-		if id, ok := t.TokenToID[b]; ok {
-			tokens = append(tokens, id)
-		} else if t.ByteFallback {
-			byteToken := fmt.Sprintf("<0x%02X>", text[i])
-			if id, ok := t.TokenToID[byteToken]; ok {
+	if t.IsByteBPE {
+		var mapped strings.Builder
+		for i := 0; i < len(text); i++ {
+			mapped.WriteString(byteToUnicode[text[i]])
+		}
+		for _, r := range mapped.String() {
+			ch := string(r)
+			if id, ok := t.TokenToID[ch]; ok {
 				tokens = append(tokens, id)
-			} else {
-				// Fallback to unknown or raw byte
-				tokens = append(tokens, int(text[i]))
+			} else if id, ok := t.TokenToID[fmt.Sprintf("<0x%02X>", unicodeToByte[r])]; ok {
+				tokens = append(tokens, id)
+			}
+		}
+	} else {
+		// Initial tokenization at byte level or individual characters
+		for i := 0; i < len(text); i++ {
+			b := text[i : i+1]
+			if id, ok := t.TokenToID[b]; ok {
+				tokens = append(tokens, id)
+			} else if t.ByteFallback {
+				byteToken := fmt.Sprintf("<0x%02X>", text[i])
+				if id, ok := t.TokenToID[byteToken]; ok {
+					tokens = append(tokens, id)
+				} else {
+					// Fallback to unknown or raw byte
+					tokens = append(tokens, int(text[i]))
+				}
 			}
 		}
 	}
@@ -207,10 +266,20 @@ func (t *Tokenizer) Decode(tokens []int) string {
 			}
 		}
 
-		// Replace special space symbols: ' ' (\u2581) or 'Ġ' (\u0120)
-		cleaned := strings.ReplaceAll(piece, " ", " ")
-		cleaned = strings.ReplaceAll(cleaned, "Ġ", " ")
-		rawBytes = append(rawBytes, []byte(cleaned)...)
+		if t.IsByteBPE {
+			for _, r := range piece {
+				if b, ok := unicodeToByte[r]; ok {
+					rawBytes = append(rawBytes, b)
+				} else {
+					rawBytes = append(rawBytes, []byte(string(r))...)
+				}
+			}
+		} else {
+			// Replace special space symbols: ' ' (\u2581) or 'Ġ' (\u0120)
+			cleaned := strings.ReplaceAll(piece, " ", " ")
+			cleaned = strings.ReplaceAll(cleaned, "Ġ", " ")
+			rawBytes = append(rawBytes, []byte(cleaned)...)
+		}
 	}
 
 	return string(rawBytes)

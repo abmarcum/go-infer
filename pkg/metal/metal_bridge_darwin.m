@@ -1346,7 +1346,8 @@ static inline id<MTLComputePipelineState> get_pipeline(int quant_type) {
         case 0: return g_pipeline_f32;
         case 1: return g_pipeline_f16;
         case 2: return g_pipeline_q4_0;
-        case 3: return g_pipeline_q8_0;
+        case 3:
+        case 8: return g_pipeline_q8_0;
         case 12: return g_pipeline_q4_k;
         case 14: return g_pipeline_q6_k;
         default: return nil;
@@ -1356,7 +1357,8 @@ static inline id<MTLComputePipelineState> get_pipeline(int quant_type) {
 static inline id<MTLComputePipelineState> get_fused_gate_up_pipeline(int quant_type) {
     switch (quant_type) {
         case 2: return g_pipeline_fused_gate_up_q4_0;
-        case 3: return g_pipeline_fused_gate_up_q8_0;
+        case 3:
+        case 8: return g_pipeline_fused_gate_up_q8_0;
         case 12: return g_pipeline_fused_gate_up_q4_k;
         case 14: return g_pipeline_fused_gate_up_q6_k;
         default: return nil;
@@ -1432,6 +1434,29 @@ int metal_forward_transformer(
             encode_gemv_buf(enc, get_pipeline(lw->wk_type), g_buf_k, g_buf_xb, (__bridge id<MTLBuffer>)lw->wk, kv_dim, dim);
             encode_gemv_buf(enc, get_pipeline(lw->wv_type), g_buf_v, g_buf_xb, (__bridge id<MTLBuffer>)lw->wv, kv_dim, dim);
 
+            // Add Q, K, V biases if present (e.g. Qwen 2 / 2.5)
+            if (lw->bq) {
+                [enc setComputePipelineState:g_pipeline_residual];
+                [enc setBuffer:g_buf_q offset:0 atIndex:0];
+                [enc setBuffer:(__bridge id<MTLBuffer>)lw->bq offset:0 atIndex:1];
+                [enc setBytes:(void*)&dim length:sizeof(uint32_t) atIndex:2];
+                [enc dispatchThreadgroups:MTLSizeMake((dim + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            }
+            if (lw->bk) {
+                [enc setComputePipelineState:g_pipeline_residual];
+                [enc setBuffer:g_buf_k offset:0 atIndex:0];
+                [enc setBuffer:(__bridge id<MTLBuffer>)lw->bk offset:0 atIndex:1];
+                [enc setBytes:(void*)&kv_dim length:sizeof(uint32_t) atIndex:2];
+                [enc dispatchThreadgroups:MTLSizeMake((kv_dim + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            }
+            if (lw->bv) {
+                [enc setComputePipelineState:g_pipeline_residual];
+                [enc setBuffer:g_buf_v offset:0 atIndex:0];
+                [enc setBuffer:(__bridge id<MTLBuffer>)lw->bv offset:0 atIndex:1];
+                [enc setBytes:(void*)&kv_dim length:sizeof(uint32_t) atIndex:2];
+                [enc dispatchThreadgroups:MTLSizeMake((kv_dim + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+            }
+
             // 3. RoPE
             [enc setComputePipelineState:g_pipeline_rope];
             [enc setBuffer:g_buf_q offset:0 atIndex:0];
@@ -1456,11 +1481,12 @@ int metal_forward_transformer(
             [enc dispatchThreadgroups:MTLSizeMake((kv_dim + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
             // 5. FlashAttention (GQA)
+            size_t layer_kv_offset = (size_t)l * max_seq * kv_dim * sizeof(float);
             [enc setComputePipelineState:g_pipeline_attn];
             [enc setBuffer:g_buf_attn_out offset:0 atIndex:0];
             [enc setBuffer:g_buf_q offset:0 atIndex:1];
-            [enc setBuffer:g_k_cache offset:0 atIndex:2];
-            [enc setBuffer:g_v_cache offset:0 atIndex:3];
+            [enc setBuffer:g_k_cache offset:layer_kv_offset atIndex:2];
+            [enc setBuffer:g_v_cache offset:layer_kv_offset atIndex:3];
             [enc setBytes:(void*)&num_heads length:sizeof(uint32_t) atIndex:4];
             [enc setBytes:(void*)&num_kv_heads length:sizeof(uint32_t) atIndex:5];
             [enc setBytes:(void*)&head_dim length:sizeof(uint32_t) atIndex:6];
@@ -1531,13 +1557,24 @@ int metal_forward_transformer(
         [enc setBytes:(void*)&norm_eps length:sizeof(float) atIndex:4];
         [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
-        // Final Output Logits Projection (Zero-copy directly to host out_logits)
-        id<MTLBuffer> buf_logits = [g_device newBufferWithBytesNoCopy:(void*)out_logits length:vocab_size * sizeof(float) options:MTLResourceStorageModeShared deallocator:nil];
-        encode_gemv_buf(enc, get_pipeline(output_weight_type), buf_logits, g_buf_xb, (__bridge id<MTLBuffer>)output_weight_buf, vocab_size, dim);
+        // Final Output Logits Projection
+        encode_gemv_buf(enc, get_pipeline(output_weight_type), g_buf_logits, g_buf_xb, (__bridge id<MTLBuffer>)output_weight_buf, vocab_size, dim);
 
         [enc endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
+
+        if ([cmd status] != MTLCommandBufferStatusCompleted) {
+            printf("Metal command buffer failed! status=%lu, error=%s\n",
+                   (unsigned long)[cmd status],
+                   [cmd error] ? [[[cmd error] localizedDescription] UTF8String] : "none");
+            fflush(stdout);
+            return -3;
+        }
+
+        if (g_buf_logits && out_logits) {
+            memcpy(out_logits, g_buf_logits.contents, vocab_size * sizeof(float));
+        }
     }
     return 0;
 }
@@ -1618,11 +1655,12 @@ int metal_forward_layer(
         [enc dispatchThreadgroups:MTLSizeMake((kv_dim + 31) / 32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
 
         // 5. FlashAttention (GQA)
+        size_t layer_kv_offset = (size_t)layer_idx * max_seq * kv_dim * sizeof(float);
         [enc setComputePipelineState:g_pipeline_attn];
         [enc setBuffer:buf_attn_out offset:0 atIndex:0];
         [enc setBuffer:buf_q offset:0 atIndex:1];
-        [enc setBuffer:g_k_cache offset:0 atIndex:2];
-        [enc setBuffer:g_v_cache offset:0 atIndex:3];
+        [enc setBuffer:g_k_cache offset:layer_kv_offset atIndex:2];
+        [enc setBuffer:g_v_cache offset:layer_kv_offset atIndex:3];
         [enc setBytes:(void*)&num_heads length:sizeof(uint32_t) atIndex:4];
         [enc setBytes:(void*)&num_kv_heads length:sizeof(uint32_t) atIndex:5];
         [enc setBytes:(void*)&head_dim length:sizeof(uint32_t) atIndex:6];

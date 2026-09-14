@@ -14,6 +14,7 @@ type ModelConfig struct {
 	BosID      int     // BOS token ID
 	EosID      int     // EOS token ID
 	EotID      int     // End of Turn / Chat message token ID
+	AddBOS     bool    // Whether to prepend BOS token (from tokenizer.ggml.add_bos_token)
 }
 
 // HeadDim returns the dimension per attention head.

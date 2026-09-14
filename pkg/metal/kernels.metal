@@ -40,6 +40,16 @@ struct block_q3_k {
     half    d;
 };
 
+static inline void get_scale_min_k4(int j, device const uint8_t* q, thread float& d_val, thread float& m_val, float d, float dmin) {
+    if (j < 4) {
+        d_val = float(q[j] & 63) * d;
+        m_val = float(q[j + 4] & 63) * dmin;
+    } else {
+        d_val = float((q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4)) * d;
+        m_val = float((q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4)) * dmin;
+    }
+}
+
 // --- 128-Thread Cooperative 8-Row SIMD Vectorized GEMV Kernels ---
 
 // 128-Thread 8-Row Vectorized F32 GEMV (128-bit Vector Loads)
@@ -341,35 +351,27 @@ kernel void gemv_q4_k(
     for (uint b = tid; b < num_blocks; b += 128) {
         uint x_off = b * 256;
 
-        for (int sb = 0; sb < 8; sb++) {
-            int q_off = sb * 16;
-            int sb_x_off = x_off + sb * 32;
-
-            float x_low[16], x_high[16];
-            #pragma unroll
-            for (int j = 0; j < 16; j++) {
-                x_low[j]  = x[sb_x_off + j];
-                x_high[j] = x[sb_x_off + j + 16];
-            }
+        for (int c = 0; c < 4; c++) {
+            int is = c * 2;
+            int q_off = c * 32;
+            device const float* x_chunk = x + x_off + c * 64;
 
             #pragma unroll
             for (int i = 0; i < 8; i++) {
                 if (r0 + i < rows) {
                     device const block_q4_k& blk = r_blocks[i][b];
                     float d = float(blk.d), dmin = float(blk.dmin);
-                    float sc, m;
-                    if (sb < 4) {
-                        sc = float(blk.scales[sb] & 63) * d;
-                        m  = float(blk.scales[sb + 4] & 63) * dmin;
-                    } else {
-                        sc = float((blk.scales[sb + 4] & 0xF) | ((blk.scales[sb - 4] >> 6) << 4)) * d;
-                        m  = float((blk.scales[sb + 4] >> 4) | ((blk.scales[sb] >> 6) << 4)) * dmin;
-                    }
-                    device const uint8_t* qs = blk.qs + q_off;
+                    float sc1, m1, sc2, m2;
+                    get_scale_min_k4(is + 0, blk.scales, sc1, m1, d, dmin);
+                    get_scale_min_k4(is + 1, blk.scales, sc2, m2, d, dmin);
+                    device const uint8_t* q_chunk = blk.qs + q_off;
+
                     #pragma unroll
-                    for (int j = 0; j < 16; j++) {
-                        uint8_t byte_val = qs[j];
-                        sums[i] += (float(byte_val & 0x0F) * sc - m) * x_low[j] + (float((byte_val >> 4) & 0x0F) * sc - m) * x_high[j];
+                    for (int l = 0; l < 32; l++) {
+                        uint8_t byte_val = q_chunk[l];
+                        float w0 = float(byte_val & 0x0F) * sc1 - m1;
+                        float w1 = float(byte_val >> 4) * sc2 - m2;
+                        sums[i] += w0 * x_chunk[l + 0] + w1 * x_chunk[l + 32];
                     }
                 }
             }
@@ -429,27 +431,38 @@ kernel void gemv_q6_k(
     for (uint b = tid; b < num_blocks; b += 128) {
         uint x_off = b * 256;
 
-        for (int sb = 0; sb < 16; sb++) {
-            int sb_x_off = x_off + sb * 16;
-            float x_vals[16];
-            #pragma unroll
-            for (int j = 0; j < 16; j++) {
-                x_vals[j] = x[sb_x_off + j];
-            }
+        for (int n = 0; n < 2; n++) {
+            device const float* x_sub = x + x_off + n * 128;
+            for (int l = 0; l < 32; l++) {
+                int is = l / 16;
+                float x0 = x_sub[l + 0];
+                float x1 = x_sub[l + 32];
+                float x2 = x_sub[l + 64];
+                float x3 = x_sub[l + 96];
 
-            #pragma unroll
-            for (int i = 0; i < 8; i++) {
-                if (r0 + i < rows) {
-                    device const block_q6_k& blk = r_blocks[i][b];
-                    float sc = float(blk.scales[sb]) * float(blk.d);
-                    #pragma unroll
-                    for (int j = 0; j < 16; j++) {
-                        int idx = sb * 16 + j;
-                        uint8_t l = blk.ql[idx / 2];
-                        int q_val = (idx % 2 == 0) ? int(l & 0x0F) : int((l >> 4) & 0x0F);
-                        uint8_t h = (blk.qh[idx / 4] >> ((idx % 4) * 2)) & 3;
-                        q_val = (q_val | (int(h) << 4)) - 32;
-                        sums[i] += (float(q_val) * sc) * x_vals[j];
+                #pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    if (r0 + i < rows) {
+                        device const block_q6_k& blk = r_blocks[i][b];
+                        device const uint8_t* ql_sub = blk.ql + n * 64;
+                        device const uint8_t* qh_sub = blk.qh + n * 32;
+                        device const int8_t*  sc_sub = blk.scales + n * 8;
+                        float d = float(blk.d);
+
+                        int q1 = int((ql_sub[l] & 0x0F) | (((qh_sub[l] >> 0) & 3) << 4)) - 32;
+                        int q2 = int((ql_sub[l + 32] & 0x0F) | (((qh_sub[l] >> 2) & 3) << 4)) - 32;
+                        int q3 = int(((ql_sub[l] >> 4) & 0x0F) | (((qh_sub[l] >> 4) & 3) << 4)) - 32;
+                        int q4 = int(((ql_sub[l + 32] >> 4) & 0x0F) | (((qh_sub[l] >> 6) & 3) << 4)) - 32;
+
+                        float s1 = d * float(sc_sub[is + 0]);
+                        float s2 = d * float(sc_sub[is + 2]);
+                        float s3 = d * float(sc_sub[is + 4]);
+                        float s4 = d * float(sc_sub[is + 6]);
+
+                        sums[i] += (float(q1) * s1) * x0
+                                 + (float(q2) * s2) * x1
+                                 + (float(q3) * s3) * x2
+                                 + (float(q4) * s4) * x3;
                     }
                 }
             }
@@ -581,24 +594,20 @@ kernel void gemm_q4_k_batched(
         float dmin = float(blk.dmin);
         uint x_off = b * 256;
 
-        for (int sb = 0; sb < 8; sb++) {
-            float sc, m;
-            if (sb < 4) {
-                sc = float(blk.scales[sb] & 63) * d;
-                m  = float(blk.scales[sb + 4] & 63) * dmin;
-            } else {
-                sc = float((blk.scales[sb + 4] & 0xF) | ((blk.scales[sb - 4] >> 6) << 4)) * d;
-                m  = float((blk.scales[sb + 4] >> 4) | ((blk.scales[sb] >> 6) << 4)) * dmin;
-            }
+        for (int c = 0; c < 4; c++) {
+            int is = c * 2;
+            int q_off = c * 32;
+            device const float* x_chunk = cur_x + x_off + c * 64;
+            float sc1, m1, sc2, m2;
+            get_scale_min_k4(is + 0, blk.scales, sc1, m1, d, dmin);
+            get_scale_min_k4(is + 1, blk.scales, sc2, m2, d, dmin);
+            device const uint8_t* q_chunk = blk.qs + q_off;
 
-            int q_off = sb * 16;
-            int sb_x_off = x_off + sb * 32;
-            for (int j = 0; j < 16; j++) {
-                uint8_t byte_val = blk.qs[q_off + j];
-                float x0 = float(byte_val & 0x0F);
-                float x1 = float((byte_val >> 4) & 0x0F);
-                sum += (x0 * sc - m) * cur_x[sb_x_off + j];
-                sum += (x1 * sc - m) * cur_x[sb_x_off + j + 16];
+            for (int l = 0; l < 32; l++) {
+                uint8_t byte_val = q_chunk[l];
+                float w0 = float(byte_val & 0x0F) * sc1 - m1;
+                float w1 = float(byte_val >> 4) * sc2 - m2;
+                sum += w0 * x_chunk[l + 0] + w1 * x_chunk[l + 32];
             }
         }
     }
@@ -632,16 +641,28 @@ kernel void gemm_q6_k_batched(
         float d = float(blk.d);
         uint x_off = b * 256;
 
-        for (int sb = 0; sb < 16; sb++) {
-            float sc = float(blk.scales[sb]) * d;
-            int sb_x_off = x_off + sb * 16;
-            for (int j = 0; j < 16; j++) {
-                int idx = sb * 16 + j;
-                uint8_t l = blk.ql[idx / 2];
-                int q_val = (idx % 2 == 0) ? int(l & 0x0F) : int((l >> 4) & 0x0F);
-                uint8_t h = (blk.qh[idx / 4] >> ((idx % 4) * 2)) & 3;
-                q_val = (q_val | (int(h) << 4)) - 32;
-                sum += (float(q_val) * sc) * cur_x[sb_x_off + j];
+        for (int n = 0; n < 2; n++) {
+            device const uint8_t* ql_sub = blk.ql + n * 64;
+            device const uint8_t* qh_sub = blk.qh + n * 32;
+            device const int8_t*  sc_sub = blk.scales + n * 8;
+            device const float*   x_sub  = cur_x + x_off + n * 128;
+
+            for (int l = 0; l < 32; l++) {
+                int is = l / 16;
+                int q1 = int((ql_sub[l] & 0x0F) | (((qh_sub[l] >> 0) & 3) << 4)) - 32;
+                int q2 = int((ql_sub[l + 32] & 0x0F) | (((qh_sub[l] >> 2) & 3) << 4)) - 32;
+                int q3 = int(((ql_sub[l] >> 4) & 0x0F) | (((qh_sub[l] >> 4) & 3) << 4)) - 32;
+                int q4 = int(((ql_sub[l + 32] >> 4) & 0x0F) | (((qh_sub[l] >> 6) & 3) << 4)) - 32;
+
+                float s1 = d * float(sc_sub[is + 0]);
+                float s2 = d * float(sc_sub[is + 2]);
+                float s3 = d * float(sc_sub[is + 4]);
+                float s4 = d * float(sc_sub[is + 6]);
+
+                sum += (float(q1) * s1) * x_sub[l + 0]
+                     + (float(q2) * s2) * x_sub[l + 32]
+                     + (float(q3) * s3) * x_sub[l + 64]
+                     + (float(q4) * s4) * x_sub[l + 96];
             }
         }
     }
@@ -1036,57 +1057,47 @@ kernel void gemv_fused_gate_up_swiglu_q4_k(
     for (uint b = tid; b < num_blocks; b += 128) {
         uint x_off = b * 256;
 
-        for (int sb = 0; sb < 8; sb++) {
-            int q_off = sb * 16;
-            int sb_x_off = x_off + sb * 32;
-
-            float x_low[16], x_high[16];
-            #pragma unroll
-            for (int j = 0; j < 16; j++) {
-                x_low[j]  = x[sb_x_off + j];
-                x_high[j] = x[sb_x_off + j + 16];
-            }
+        for (int c = 0; c < 4; c++) {
+            int is = c * 2;
+            int q_off = c * 32;
+            device const float* x_chunk = x + x_off + c * 64;
 
             #pragma unroll
             for (int i = 0; i < 8; i++) {
                 if (r0 + i < hidden_dim) {
-                    // Gate block
+                    // Gate
                     {
                         device const block_q4_k& blk = gate_blocks[i][b];
                         float d = float(blk.d), dmin = float(blk.dmin);
-                        float sc, m;
-                        if (sb < 4) {
-                            sc = float(blk.scales[sb] & 63) * d;
-                            m  = float(blk.scales[sb + 4] & 63) * dmin;
-                        } else {
-                            sc = float((blk.scales[sb + 4] & 0xF) | ((blk.scales[sb - 4] >> 6) << 4)) * d;
-                            m  = float((blk.scales[sb + 4] >> 4) | ((blk.scales[sb] >> 6) << 4)) * dmin;
-                        }
-                        device const uint8_t* qs = blk.qs + q_off;
+                        float sc1, m1, sc2, m2;
+                        get_scale_min_k4(is + 0, blk.scales, sc1, m1, d, dmin);
+                        get_scale_min_k4(is + 1, blk.scales, sc2, m2, d, dmin);
+                        device const uint8_t* q_chunk = blk.qs + q_off;
+
                         #pragma unroll
-                        for (int j = 0; j < 16; j++) {
-                            uint8_t byte_val = qs[j];
-                            sums_g[i] += (float(byte_val & 0x0F) * sc - m) * x_low[j] + (float((byte_val >> 4) & 0x0F) * sc - m) * x_high[j];
+                        for (int l = 0; l < 32; l++) {
+                            uint8_t byte_val = q_chunk[l];
+                            float w0 = float(byte_val & 0x0F) * sc1 - m1;
+                            float w1 = float(byte_val >> 4) * sc2 - m2;
+                            sums_g[i] += w0 * x_chunk[l + 0] + w1 * x_chunk[l + 32];
                         }
                     }
 
-                    // Up block
+                    // Up
                     {
                         device const block_q4_k& blk = up_blocks[i][b];
                         float d = float(blk.d), dmin = float(blk.dmin);
-                        float sc, m;
-                        if (sb < 4) {
-                            sc = float(blk.scales[sb] & 63) * d;
-                            m  = float(blk.scales[sb + 4] & 63) * dmin;
-                        } else {
-                            sc = float((blk.scales[sb + 4] & 0xF) | ((blk.scales[sb - 4] >> 6) << 4)) * d;
-                            m  = float((blk.scales[sb + 4] >> 4) | ((blk.scales[sb] >> 6) << 4)) * dmin;
-                        }
-                        device const uint8_t* qs = blk.qs + q_off;
+                        float sc1, m1, sc2, m2;
+                        get_scale_min_k4(is + 0, blk.scales, sc1, m1, d, dmin);
+                        get_scale_min_k4(is + 1, blk.scales, sc2, m2, d, dmin);
+                        device const uint8_t* q_chunk = blk.qs + q_off;
+
                         #pragma unroll
-                        for (int j = 0; j < 16; j++) {
-                            uint8_t byte_val = qs[j];
-                            sums_u[i] += (float(byte_val & 0x0F) * sc - m) * x_low[j] + (float((byte_val >> 4) & 0x0F) * sc - m) * x_high[j];
+                        for (int l = 0; l < 32; l++) {
+                            uint8_t byte_val = q_chunk[l];
+                            float w0 = float(byte_val & 0x0F) * sc1 - m1;
+                            float w1 = float(byte_val >> 4) * sc2 - m2;
+                            sums_u[i] += w0 * x_chunk[l + 0] + w1 * x_chunk[l + 32];
                         }
                     }
                 }
@@ -1157,44 +1168,64 @@ kernel void gemv_fused_gate_up_swiglu_q6_k(
     for (uint b = tid; b < num_blocks; b += 128) {
         uint x_off = b * 256;
 
-        for (int sb = 0; sb < 16; sb++) {
-            int sb_x_off = x_off + sb * 16;
-            float x_vals[16];
-            #pragma unroll
-            for (int j = 0; j < 16; j++) {
-                x_vals[j] = x[sb_x_off + j];
-            }
+        for (int n = 0; n < 2; n++) {
+            device const float* x_sub = x + x_off + n * 128;
+            for (int l = 0; l < 32; l++) {
+                int is = l / 16;
+                float x0 = x_sub[l + 0];
+                float x1 = x_sub[l + 32];
+                float x2 = x_sub[l + 64];
+                float x3 = x_sub[l + 96];
 
-            #pragma unroll
-            for (int i = 0; i < 8; i++) {
-                if (r0 + i < hidden_dim) {
-                    // Gate
-                    {
-                        device const block_q6_k& blk = gate_blocks[i][b];
-                        float sc = float(blk.scales[sb]) * float(blk.d);
-                        #pragma unroll
-                        for (int j = 0; j < 16; j++) {
-                            int idx = sb * 16 + j;
-                            uint8_t l = blk.ql[idx / 2];
-                            int q_val = (idx % 2 == 0) ? int(l & 0x0F) : int((l >> 4) & 0x0F);
-                            uint8_t h = (blk.qh[idx / 4] >> ((idx % 4) * 2)) & 3;
-                            q_val = (q_val | (int(h) << 4)) - 32;
-                            sums_g[i] += (float(q_val) * sc) * x_vals[j];
+                #pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    if (r0 + i < hidden_dim) {
+                        // Gate
+                        {
+                            device const block_q6_k& blk = gate_blocks[i][b];
+                            device const uint8_t* ql_sub = blk.ql + n * 64;
+                            device const uint8_t* qh_sub = blk.qh + n * 32;
+                            device const int8_t*  sc_sub = blk.scales + n * 8;
+                            float d = float(blk.d);
+
+                            int q1 = int((ql_sub[l] & 0x0F) | (((qh_sub[l] >> 0) & 3) << 4)) - 32;
+                            int q2 = int((ql_sub[l + 32] & 0x0F) | (((qh_sub[l] >> 2) & 3) << 4)) - 32;
+                            int q3 = int(((ql_sub[l] >> 4) & 0x0F) | (((qh_sub[l] >> 4) & 3) << 4)) - 32;
+                            int q4 = int(((ql_sub[l + 32] >> 4) & 0x0F) | (((qh_sub[l] >> 6) & 3) << 4)) - 32;
+
+                            float s1 = d * float(sc_sub[is + 0]);
+                            float s2 = d * float(sc_sub[is + 2]);
+                            float s3 = d * float(sc_sub[is + 4]);
+                            float s4 = d * float(sc_sub[is + 6]);
+
+                            sums_g[i] += (float(q1) * s1) * x0
+                                       + (float(q2) * s2) * x1
+                                       + (float(q3) * s3) * x2
+                                       + (float(q4) * s4) * x3;
                         }
-                    }
 
-                    // Up
-                    {
-                        device const block_q6_k& blk = up_blocks[i][b];
-                        float sc = float(blk.scales[sb]) * float(blk.d);
-                        #pragma unroll
-                        for (int j = 0; j < 16; j++) {
-                            int idx = sb * 16 + j;
-                            uint8_t l = blk.ql[idx / 2];
-                            int q_val = (idx % 2 == 0) ? int(l & 0x0F) : int((l >> 4) & 0x0F);
-                            uint8_t h = (blk.qh[idx / 4] >> ((idx % 4) * 2)) & 3;
-                            q_val = (q_val | (int(h) << 4)) - 32;
-                            sums_u[i] += (float(q_val) * sc) * x_vals[j];
+                        // Up
+                        {
+                            device const block_q6_k& blk = up_blocks[i][b];
+                            device const uint8_t* ql_sub = blk.ql + n * 64;
+                            device const uint8_t* qh_sub = blk.qh + n * 32;
+                            device const int8_t*  sc_sub = blk.scales + n * 8;
+                            float d = float(blk.d);
+
+                            int q1 = int((ql_sub[l] & 0x0F) | (((qh_sub[l] >> 0) & 3) << 4)) - 32;
+                            int q2 = int((ql_sub[l + 32] & 0x0F) | (((qh_sub[l] >> 2) & 3) << 4)) - 32;
+                            int q3 = int(((ql_sub[l] >> 4) & 0x0F) | (((qh_sub[l] >> 4) & 3) << 4)) - 32;
+                            int q4 = int(((ql_sub[l + 32] >> 4) & 0x0F) | (((qh_sub[l] >> 6) & 3) << 4)) - 32;
+
+                            float s1 = d * float(sc_sub[is + 0]);
+                            float s2 = d * float(sc_sub[is + 2]);
+                            float s3 = d * float(sc_sub[is + 4]);
+                            float s4 = d * float(sc_sub[is + 6]);
+
+                            sums_u[i] += (float(q1) * s1) * x0
+                                       + (float(q2) * s2) * x1
+                                       + (float(q3) * s3) * x2
+                                       + (float(q4) * s4) * x3;
                         }
                     }
                 }

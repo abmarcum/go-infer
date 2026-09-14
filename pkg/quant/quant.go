@@ -225,24 +225,26 @@ func DequantizeQ4_K(data []byte, numElements int) []float32 {
 		qs := data[offset+16 : offset+144]
 		offset += 144
 
-		// 8 sub-blocks of 32 elements
-		for sb := 0; sb < 8; sb++ {
-			var sc, m float32
-			if sb < 4 {
-				sc = float32(scales[sb]&63) * d
-				m = float32(scales[sb+4]&63) * dmin
-			} else {
-				sc = float32((scales[sb+4]&0xF)|((scales[sb-4]>>6)<<4)) * d
-				m = float32((scales[sb+4]>>4)|((scales[sb]>>6)<<4)) * dmin
+		getScaleMin := func(j int) (float32, float32) {
+			if j < 4 {
+				return float32(scales[j]&63) * d, float32(scales[j+4]&63) * dmin
 			}
+			sc := float32((scales[j+4]&0xF)|((scales[j-4]>>6)<<4)) * d
+			m := float32((scales[j+4]>>4)|((scales[j]>>6)<<4)) * dmin
+			return sc, m
+		}
 
-			qOffset := sb * 16
-			for j := 0; j < 16; j++ {
-				b := qs[qOffset+j]
-				x0 := float32(b & 0x0F)
-				x1 := float32((b >> 4) & 0x0F)
-				out[outIdx+sb*32+j] = x0*sc - m
-				out[outIdx+sb*32+j+16] = x1*sc - m
+		for c := 0; c < 4; c++ {
+			is := c * 2
+			d1, m1 := getScaleMin(is + 0)
+			d2, m2 := getScaleMin(is + 1)
+			qChunk := qs[c*32 : (c+1)*32]
+			baseOut := outIdx + c*64
+
+			for l := 0; l < 32; l++ {
+				b := qChunk[l]
+				out[baseOut+l+0] = float32(b&0x0F)*d1 - m1
+				out[baseOut+l+32] = float32(b>>4)*d2 - m2
 			}
 		}
 		outIdx += 256
@@ -264,20 +266,23 @@ func DequantizeQ6_K(data []byte, numElements int) []float32 {
 		d := FP16ToFP32(binary.LittleEndian.Uint16(data[offset+208:]))
 		offset += 210
 
-		for sb := 0; sb < 16; sb++ {
-			sc := float32(int8(scales[sb])) * d
-			for j := 0; j < 16; j++ {
-				idx := sb*16 + j
-				l := ql[idx/2]
-				var qVal int
-				if idx%2 == 0 {
-					qVal = int(l & 0x0F)
-				} else {
-					qVal = int((l >> 4) & 0x0F)
-				}
-				h := (qh[idx/4] >> ((idx % 4) * 2)) & 3
-				qVal = (qVal | (int(h) << 4)) - 32
-				out[outIdx+idx] = float32(qVal) * sc
+		for n := 0; n < 2; n++ {
+			qlSub := ql[n*64:]
+			qhSub := qh[n*32:]
+			scSub := scales[n*8:]
+			baseOut := outIdx + n*128
+
+			for l := 0; l < 32; l++ {
+				is := l / 16
+				q1 := int((qlSub[l]&0x0F)|(((qhSub[l]>>0)&3)<<4)) - 32
+				q2 := int((qlSub[l+32]&0x0F)|(((qhSub[l]>>2)&3)<<4)) - 32
+				q3 := int(((qlSub[l]>>4)&0x0F)|(((qhSub[l]>>4)&3)<<4)) - 32
+				q4 := int(((qlSub[l+32]>>4)&0x0F)|(((qhSub[l]>>6)&3)<<4)) - 32
+
+				out[baseOut+l+0] = d * float32(int8(scSub[is+0])) * float32(q1)
+				out[baseOut+l+32] = d * float32(int8(scSub[is+2])) * float32(q2)
+				out[baseOut+l+64] = d * float32(int8(scSub[is+4])) * float32(q3)
+				out[baseOut+l+96] = d * float32(int8(scSub[is+6])) * float32(q4)
 			}
 		}
 		outIdx += 256

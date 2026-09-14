@@ -172,3 +172,101 @@ func ApplyJSONGrammarMask(logits []float32, vocab []string, validator *GrammarVa
 		}
 	}
 }
+
+// ReasoningState tracks the generation phase of Chain-of-Thought reasoning.
+type ReasoningState int
+
+const (
+	ReasoningStateStart ReasoningState = iota
+	ReasoningStateThinking
+	ReasoningStateAnswer
+)
+
+// ReasoningGrammarValidator enforces structured thinking tags (<think>...</think>) before solution generation.
+type ReasoningGrammarValidator struct {
+	State       ReasoningState
+	Buffer      strings.Builder
+	MinThinkLen int // Minimum characters of reasoning required before closing </think>
+}
+
+// NewReasoningGrammarValidator creates a validator enforcing reasoning steps.
+func NewReasoningGrammarValidator(minThinkLen int) *ReasoningGrammarValidator {
+	return &ReasoningGrammarValidator{
+		State:       ReasoningStateStart,
+		MinThinkLen: minThinkLen,
+	}
+}
+
+// Clone creates an independent copy of the reasoning validator.
+func (r *ReasoningGrammarValidator) Clone() *ReasoningGrammarValidator {
+	clone := &ReasoningGrammarValidator{
+		State:       r.State,
+		MinThinkLen: r.MinThinkLen,
+	}
+	clone.Buffer.WriteString(r.Buffer.String())
+	return clone
+}
+
+// Accepts checks if appending tokenStr keeps the reasoning state valid.
+func (r *ReasoningGrammarValidator) Accepts(tokenStr string) bool {
+	temp := r.Clone()
+	return temp.Process(tokenStr)
+}
+
+// Process updates the reasoning state machine with incoming characters.
+func (r *ReasoningGrammarValidator) Process(tokenStr string) bool {
+	r.Buffer.WriteString(tokenStr)
+	curText := r.Buffer.String()
+
+	switch r.State {
+	case ReasoningStateStart:
+		trimmed := strings.TrimSpace(curText)
+		if strings.HasPrefix("<think>", trimmed) || strings.HasPrefix(trimmed, "<think>") {
+			if strings.Contains(curText, "<think>") {
+				r.State = ReasoningStateThinking
+			}
+			return true
+		}
+		// If it starts with non-think text, only allow if not strictly enforcing <think>
+		return false
+
+	case ReasoningStateThinking:
+		// Check for closing </think>
+		if strings.Contains(curText, "</think>") {
+			// Enforce minThinkLen
+			startIdx := strings.Index(curText, "<think>") + len("<think>")
+			endIdx := strings.Index(curText, "</think>")
+			if endIdx-startIdx < r.MinThinkLen {
+				return false // Closed think tag too early!
+			}
+			r.State = ReasoningStateAnswer
+		}
+		return true
+
+	case ReasoningStateAnswer:
+		// In answer phase, cannot re-enter thinking
+		if strings.Contains(tokenStr, "<think>") {
+			return false
+		}
+		return true
+	}
+
+	return true
+}
+
+// ApplyReasoningGrammarMask masks logits that violate reasoning structure.
+func ApplyReasoningGrammarMask(logits []float32, vocab []string, validator *ReasoningGrammarValidator) {
+	if validator == nil {
+		return
+	}
+	for i, logit := range logits {
+		if logit <= -1e8 || i >= len(vocab) {
+			continue
+		}
+		tokStr := vocab[i]
+		if !validator.Accepts(tokStr) {
+			logits[i] = -1e9
+		}
+	}
+}
+

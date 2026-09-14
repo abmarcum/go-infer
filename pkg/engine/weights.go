@@ -117,6 +117,17 @@ func (w *Weights) Get1DWeight(name string, defaultDim int) []float32 {
 	return ones
 }
 
+// Get1DBias returns 1D bias tensor as float32 slice, or nil if not present.
+func (w *Weights) Get1DBias(name string) []float32 {
+	resolved, ok := w.ResolveTensorName(name)
+	if ok {
+		if f32s, exists := w.F32Weights[resolved]; exists && len(f32s) > 0 {
+			return f32s
+		}
+	}
+	return nil
+}
+
 // ExtractEmbedding copies the embedding vector for a token into out.
 func (w *Weights) ExtractEmbedding(token int, out []float32, dim int) {
 	tensorName, ok := w.ResolveTensorName("token_embd.weight")

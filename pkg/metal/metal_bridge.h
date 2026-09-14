@@ -41,6 +41,9 @@ typedef struct {
     metal_buffer_t ffn_down; int ffn_down_type;
     metal_buffer_t attn_norm;
     metal_buffer_t ffn_norm;
+    metal_buffer_t bq;
+    metal_buffer_t bk;
+    metal_buffer_t bv;
 } metal_layer_weights_t;
 
 // Single-call forward pass across all transformer layers with GPU-resident activations

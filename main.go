@@ -8,6 +8,7 @@ import (
 	"go-inference/pkg/downloader"
 	"go-inference/pkg/engine"
 	"go-inference/pkg/metal"
+	"go-inference/pkg/reasoning"
 	"go-inference/pkg/sampler"
 	"go-inference/pkg/server"
 	"log"
@@ -44,6 +45,9 @@ func main() {
 		pipelineNext   string
 		tpRank         int
 		tpPeers        string
+		bestOfN        int
+		reasoningMode  bool
+		enableCalc     bool
 	)
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit")
@@ -59,6 +63,9 @@ func main() {
 	flag.IntVar(&topK, "top-k", 40, "Top-K sampling cutoff")
 	flag.Float64Var(&repPenalty, "rep-penalty", 1.1, "Repetition penalty")
 	flag.StringVar(&kvType, "kv-type", "f32", "KV-cache storage precision: f32 (default), q8_0 (2x RAM savings), q4_0 (4x RAM savings)")
+	flag.IntVar(&bestOfN, "best-of-n", 1, "Run self-consistency majority voting with N candidate chains")
+	flag.BoolVar(&reasoningMode, "reasoning", false, "Enable reasoning mode (optimal hyperparameters for CoT models e.g. DeepSeek-R1)")
+	flag.BoolVar(&enableCalc, "calc", false, "Enable embedded math/calculator evaluation tool loop")
 
 	// Distributed inference flags
 	flag.StringVar(&distMode, "dist-mode", "none", "Distributed inference mode: none, speculative, pipeline, tensor-parallel")
@@ -125,6 +132,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	modelTag := modelPath
+	resolvedPath, err := downloader.ResolveModelPath(modelPath)
+	if err != nil {
+		log.Fatalf("Failed to locate model: %v", err)
+	}
+	if resolvedPath != modelPath {
+		log.Printf("Resolved Ollama model tag '%s' -> %s", modelPath, resolvedPath)
+		modelPath = resolvedPath
+	}
+
 	log.Printf("Loading GGUF model from: %s", modelPath)
 	eng, err := engine.LoadModel(modelPath, numThreads)
 	if err != nil {
@@ -161,12 +178,66 @@ func main() {
 		TopK:        topK,
 		RepPenalty:  float32(repPenalty),
 	}
+	if reasoningMode {
+		params = reasoning.ReasoningParams()
+		if maxTokens == 256 {
+			maxTokens = 1024
+		}
+		if temperature > 0 {
+			params.Temperature = float32(temperature)
+		}
+		if topP > 0 {
+			params.TopP = float32(topP)
+		}
+	}
+
+	// Auto-format prompt with chat template if model is Instruct/Chat and prompt doesn't already contain special tags
+	formattedPrompt := promptText
+	_, hasChatML := eng.Tokenizer.TokenToID["<|im_start|>"]
+	_, hasLlamaHeader := eng.Tokenizer.TokenToID["<|start_header_id|>"]
+	isChatModel := hasChatML || hasLlamaHeader ||
+		strings.Contains(strings.ToLower(modelTag), "instruct") ||
+		strings.Contains(strings.ToLower(modelTag), "chat") ||
+		strings.Contains(strings.ToLower(modelTag), "qwen") ||
+		strings.Contains(strings.ToLower(modelTag), "r1") ||
+		strings.Contains(strings.ToLower(modelTag), "deepseek")
+
+	if promptText != "" && !strings.Contains(promptText, "<|") && isChatModel {
+		formattedPrompt = eng.FormatChat([]engine.ChatMessage{{Role: "user", Content: promptText}})
+	}
+
+	// Self-Consistency Best-of-N Consensus Mode
+	if bestOfN > 1 && promptText != "" {
+		fmt.Printf("\n--- Self-Consistency Voting (%d paths) ---\nPrompt: %s\n", bestOfN, promptText)
+		currentCandidate := -1
+		consensus, stats, err := eng.GenerateConsensusWithStream(formattedPrompt, bestOfN, maxTokens, params, func(sampleIdx int, piece string) {
+			if sampleIdx != currentCandidate {
+				currentCandidate = sampleIdx
+				fmt.Printf("\n>>> Candidate %d:\n", sampleIdx+1)
+			}
+			fmt.Print(piece)
+			os.Stdout.Sync()
+		}, func(cand *reasoning.CandidateAnswer) {
+			fmt.Printf("\n(Extracted: %s)\n", cand.NormAnswer)
+		})
+		if err != nil {
+			log.Fatalf("Consensus error: %v", err)
+		}
+		fmt.Println("\n═════════════════════════════════════════════════════")
+		fmt.Printf("🏆 Consensus Majority Answer: %s\n", consensus.WinningAnswer)
+		fmt.Printf("📊 Confidence: %.1f%% (%d/%d votes)\n", consensus.Confidence*100, consensus.Votes, consensus.TotalSamples)
+		fmt.Printf("⚡ Throughput: %.2f tok/s across %d tokens\n", stats.TokensPerSecond, stats.GeneratedTokens)
+		fmt.Println("═════════════════════════════════════════════════════")
+		return
+	}
 
 	// Single Prompt Mode
 	if promptText != "" {
 		fmt.Printf("\n--- Prompt ---\n%s\n\n--- Response ---\n", promptText)
-		stats, err := eng.Generate(promptText, maxTokens, params, func(token string) bool {
+		var fullResp strings.Builder
+		stats, err := eng.GenerateWithTools(formattedPrompt, maxTokens, params, enableCalc, func(token string) bool {
 			fmt.Print(token)
+			fullResp.WriteString(token)
 			return true
 		})
 		if err != nil {
@@ -175,14 +246,20 @@ func main() {
 		fmt.Println()
 		fmt.Printf("\n[Prefill: %v | Generation: %v (%d tokens, %.2f tok/s)]\n",
 			stats.PrefillDuration, stats.GenerateDuration, stats.GeneratedTokens, stats.TokensPerSecond)
+		if reasoningMode {
+			ans := reasoning.ExtractAnswer(fullResp.String())
+			if ans != "" {
+				fmt.Printf("[Extracted Final Answer: %s]\n", ans)
+			}
+		}
 		return
 	}
 
 	// Interactive REPL Mode
-	runInteractiveREPL(eng, maxTokens, params)
+	runInteractiveREPL(eng, maxTokens, params, enableCalc)
 }
 
-func runInteractiveREPL(eng *engine.Engine, maxTokens int, params sampler.Params) {
+func runInteractiveREPL(eng *engine.Engine, maxTokens int, params sampler.Params, enableCalc bool) {
 	fmt.Println("\n=== Interactive Chat Mode (type 'exit' or Ctrl+C to quit) ===")
 	scanner := bufio.NewScanner(os.Stdin)
 	var messages []engine.ChatMessage
@@ -209,7 +286,7 @@ func runInteractiveREPL(eng *engine.Engine, maxTokens int, params sampler.Params
 		fmt.Print("Assistant > ")
 
 		var assistantResponse strings.Builder
-		stats, err := eng.Generate(prompt, maxTokens, params, func(token string) bool {
+		stats, err := eng.GenerateWithTools(prompt, maxTokens, params, enableCalc, func(token string) bool {
 			fmt.Print(token)
 			assistantResponse.WriteString(token)
 			return true

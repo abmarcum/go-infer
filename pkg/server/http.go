@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go-inference/pkg/engine"
+	"go-inference/pkg/reasoning"
 	"go-inference/pkg/sampler"
 	"log"
 	"net/http"
@@ -50,7 +51,7 @@ type ResponseFormat struct {
 
 // Tool represents an OpenAI tool specification.
 type Tool struct {
-	Type     string      `json:"type"`
+	Type     string       `json:"type"`
 	Function ToolFunction `json:"function"`
 }
 
@@ -73,15 +74,18 @@ type ToolCallFunction struct {
 
 // OpenAI API Types
 type OpenAIChatRequest struct {
-	Model          string               `json:"model"`
-	Messages       []engine.ChatMessage `json:"messages"`
-	Stream         bool                 `json:"stream"`
-	Temperature    float32              `json:"temperature"`
-	TopP           float32              `json:"top_p"`
-	MaxTokens      int                  `json:"max_tokens"`
-	ResponseFormat *ResponseFormat      `json:"response_format,omitempty"`
-	Tools          []Tool               `json:"tools,omitempty"`
-	ToolChoice     interface{}          `json:"tool_choice,omitempty"`
+	Model           string               `json:"model"`
+	Messages        []engine.ChatMessage `json:"messages"`
+	Stream          bool                 `json:"stream"`
+	Temperature     float32              `json:"temperature"`
+	TopP            float32              `json:"top_p"`
+	MaxTokens       int                  `json:"max_tokens"`
+	ResponseFormat  *ResponseFormat      `json:"response_format,omitempty"`
+	Tools           []Tool               `json:"tools,omitempty"`
+	ToolChoice      interface{}          `json:"tool_choice,omitempty"`
+	N               int                  `json:"n,omitempty"`
+	BestOfN         int                  `json:"best_of_n,omitempty"`
+	ReasoningEffort string               `json:"reasoning_effort,omitempty"`
 }
 
 type OpenAIStreamChunk struct {
@@ -99,9 +103,10 @@ type OpenAIChoiceChunk struct {
 }
 
 type OpenAIDelta struct {
-	Role      string     `json:"role,omitempty"`
-	Content   string     `json:"content,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Role             string     `json:"role,omitempty"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type OpenAIChatResponse struct {
@@ -114,20 +119,22 @@ type OpenAIChatResponse struct {
 }
 
 type OpenAIChoice struct {
-	Index        int                `json:"index"`
-	Message      OpenAIChatMessage  `json:"message"`
-	FinishReason string             `json:"finish_reason"`
+	Index        int               `json:"index"`
+	Message      OpenAIChatMessage `json:"message"`
+	FinishReason string            `json:"finish_reason"`
 }
 
 type OpenAIChatMessage struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Role             string     `json:"role"`
+	Content          string     `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type OpenAIUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
+
 	TotalTokens      int `json:"total_tokens"`
 }
 
@@ -511,22 +518,88 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 		maxTokens = s.Engine.Config.SeqLen
 	}
 
+	// Auto-tune hyperparameters for reasoning models
+	isReasoning := req.ReasoningEffort != "" || strings.Contains(strings.ToLower(req.Model), "r1") || strings.Contains(strings.ToLower(req.Model), "reasoning")
 	params := sampler.Params{
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
 		TopK:        40,
 		RepPenalty:  1.1,
 	}
-	if params.Temperature <= 0 {
-		params.Temperature = 0.7
-	}
-	if params.TopP <= 0 {
-		params.TopP = 0.9
+	if isReasoning {
+		params = reasoning.ReasoningParams()
+		if req.Temperature > 0 {
+			params.Temperature = req.Temperature
+		}
+		if req.TopP > 0 {
+			params.TopP = req.TopP
+		}
+	} else {
+		if params.Temperature <= 0 {
+			params.Temperature = 0.7
+		}
+		if params.TopP <= 0 {
+			params.TopP = 0.9
+		}
 	}
 
 	// Constrained JSON Grammar if requested
 	if req.ResponseFormat != nil && req.ResponseFormat.Type == "json_object" {
 		params.JSONValidator = sampler.NewJSONGrammarValidator()
+	}
+
+	// Multi-candidate Self-Consistency / Best-of-N Consensus
+	numCandidates := req.N
+	if req.BestOfN > numCandidates {
+		numCandidates = req.BestOfN
+	}
+
+	if numCandidates > 1 {
+		consensus, stats, err := s.Engine.GenerateConsensus(prompt, numCandidates, maxTokens, params, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if stats != nil {
+			atomic.AddUint64(&s.TokensTotal, uint64(stats.GeneratedTokens))
+			atomic.AddUint64(&s.PrefillMillis, uint64(stats.PrefillDuration.Milliseconds()))
+			atomic.AddUint64(&s.GenerationMillis, uint64(stats.GenerateDuration.Milliseconds()))
+		}
+
+		choices := make([]OpenAIChoice, len(consensus.AllCandidates))
+		for i, cand := range consensus.AllCandidates {
+			thought, ans := cand.Thinking, cand.RawAnswer
+			if ans == "" {
+				ans = cand.FullOutput
+			}
+			choices[i] = OpenAIChoice{
+				Index: i,
+				Message: OpenAIChatMessage{
+					Role:             "assistant",
+					Content:          ans,
+					ReasoningContent: thought,
+				},
+				FinishReason: "stop",
+			}
+		}
+
+		resp := OpenAIChatResponse{
+			ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+			Object:  "chat.completion",
+			Created: time.Now().Unix(),
+			Model:   s.ModelName,
+			Choices: choices,
+			Usage: OpenAIUsage{
+				PromptTokens:     stats.PromptTokens,
+				CompletionTokens: stats.GeneratedTokens,
+				TotalTokens:      stats.PromptTokens + stats.GeneratedTokens,
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+		return
 	}
 
 	if req.Stream {
@@ -540,8 +613,24 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 		}
 
 		reqID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+		inThinking := false
 
 		stats, _ := s.Engine.Generate(prompt, maxTokens, params, func(token string) bool {
+			delta := OpenAIDelta{}
+			if strings.Contains(token, "<think>") {
+				inThinking = true
+				clean := strings.ReplaceAll(token, "<think>", "")
+				delta.ReasoningContent = clean
+			} else if strings.Contains(token, "</think>") {
+				inThinking = false
+				clean := strings.ReplaceAll(token, "</think>", "")
+				delta.Content = clean
+			} else if inThinking {
+				delta.ReasoningContent = token
+			} else {
+				delta.Content = token
+			}
+
 			chunk := OpenAIStreamChunk{
 				ID:      reqID,
 				Object:  "chat.completion.chunk",
@@ -550,7 +639,7 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 				Choices: []OpenAIChoiceChunk{
 					{
 						Index: 0,
-						Delta: OpenAIDelta{Content: token},
+						Delta: delta,
 					},
 				},
 			}
@@ -589,6 +678,11 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 	}
 
 	replyText := fullResponse.String()
+	thought, ans := reasoning.ExtractThinking(replyText)
+	if thought != "" {
+		replyText = ans
+	}
+
 	var toolCalls []ToolCall
 
 	// Tool call detection in JSON responses
@@ -624,9 +718,10 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 			{
 				Index: 0,
 				Message: OpenAIChatMessage{
-					Role:      "assistant",
-					Content:   replyText,
-					ToolCalls: toolCalls,
+					Role:             "assistant",
+					Content:          replyText,
+					ReasoningContent: thought,
+					ToolCalls:        toolCalls,
 				},
 				FinishReason: finishReason,
 			},

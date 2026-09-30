@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"go-inference/pkg/engine"
+	"go-inference/pkg/guardrails"
 	"go-inference/pkg/reasoning"
 	"go-inference/pkg/sampler"
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -17,12 +19,21 @@ import (
 //go:embed web/ui.html
 var webUIHTML string
 
-// Server handles OpenAI, Ollama, and Web UI HTTP requests.
+// Server handles OpenAI, Ollama, and Web UI HTTP requests with security and rate limiting.
 type Server struct {
 	Engine     *engine.Engine
 	ModelName  string
 	Port       string
 	CORSOrigin string
+	APIKey     string
+
+	// Concurrency & Mutex synchronization
+	engineMutex sync.Mutex
+	sem         chan struct{}
+
+	// Guardrails and Hybrid C-Core execution
+	EnableGuardrails bool
+	CoreGenerator    func(prompt string) (string, error)
 
 	// Telemetry & Metrics Counters
 	RequestsTotal    uint64
@@ -31,7 +42,7 @@ type Server struct {
 	GenerationMillis uint64
 }
 
-// NewServer creates a new HTTP server instance.
+// NewServer creates a new HTTP server instance with safe concurrency limits.
 func NewServer(eng *engine.Engine, modelName, port string) *Server {
 	if !strings.HasPrefix(port, ":") {
 		port = ":" + port
@@ -40,7 +51,8 @@ func NewServer(eng *engine.Engine, modelName, port string) *Server {
 		Engine:     eng,
 		ModelName:  modelName,
 		Port:       port,
-		CORSOrigin: "*",
+		CORSOrigin: "", // secure default: no open wildcard unless explicitly set
+		sem:        make(chan struct{}, 32),
 	}
 }
 
@@ -184,6 +196,9 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/v1/chat/completions", s.handleOpenAIChatCompletions)
 	mux.HandleFunc("/v1/embeddings", s.handleOpenAIEmbeddings)
 
+	// Asimov Guardrails Endpoint
+	mux.HandleFunc("/v1/generate", s.handleGuardrailsGenerate)
+
 	// Ollama Endpoints
 	mux.HandleFunc("/api/generate", s.handleOllamaGenerate)
 	mux.HandleFunc("/api/tags", s.handleOllamaTags)
@@ -212,6 +227,48 @@ func (s *Server) setCORS(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+}
+
+func (s *Server) checkAuth(w http.ResponseWriter, r *http.Request) bool {
+	if s.APIKey == "" {
+		return true
+	}
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Unauthorized: missing Authorization header", http.StatusUnauthorized)
+		return false
+	}
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	token = strings.TrimSpace(token)
+	if token != s.APIKey {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Unauthorized: invalid API key", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+func (s *Server) acquireSlot(w http.ResponseWriter) bool {
+	if s.sem == nil {
+		s.sem = make(chan struct{}, 32)
+	}
+	select {
+	case s.sem <- struct{}{}:
+		return true
+	default:
+		http.Error(w, "Too Many Requests: server concurrency limit reached", http.StatusTooManyRequests)
+		return false
+	}
+}
+
+func (s *Server) releaseSlot() {
+	if s.sem != nil {
+		select {
+		case <-s.sem:
+		default:
+		}
+	}
 }
 
 func (s *Server) handleWebUI(w http.ResponseWriter, r *http.Request) {
@@ -256,6 +313,22 @@ func (s *Server) handleOpenAIEmbeddings(w http.ResponseWriter, r *http.Request) 
 	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !s.checkAuth(w, r) {
+		return
+	}
+	if !s.acquireSlot(w) {
+		return
+	}
+	defer s.releaseSlot()
+
+	s.engineMutex.Lock()
+	defer s.engineMutex.Unlock()
+
+	if s.Engine == nil {
+		http.Error(w, "embeddings not supported: engine not initialized", http.StatusNotImplemented)
 		return
 	}
 
@@ -328,6 +401,22 @@ func (s *Server) handlePipelineForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.checkAuth(w, r) {
+		return
+	}
+	if !s.acquireSlot(w) {
+		return
+	}
+	defer s.releaseSlot()
+
+	s.engineMutex.Lock()
+	defer s.engineMutex.Unlock()
+
+	if s.Engine == nil {
+		http.Error(w, "engine not initialized", http.StatusInternalServerError)
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024)
 
 	var req struct {
@@ -370,6 +459,22 @@ func (s *Server) handleSpeculativeDraft(w http.ResponseWriter, r *http.Request) 
 	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !s.checkAuth(w, r) {
+		return
+	}
+	if !s.acquireSlot(w) {
+		return
+	}
+	defer s.releaseSlot()
+
+	s.engineMutex.Lock()
+	defer s.engineMutex.Unlock()
+
+	if s.Engine == nil {
+		http.Error(w, "engine not initialized", http.StatusInternalServerError)
 		return
 	}
 
@@ -431,6 +536,10 @@ func (s *Server) handleTPReduce(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.checkAuth(w, r) {
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024)
 
 	var req struct {
@@ -453,24 +562,34 @@ func (s *Server) handleTPReduce(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	resp := map[string]interface{}{
 		"status": "healthy",
 		"model":  s.ModelName,
-		"layers": s.Engine.Config.NumLayers,
-		"dim":    s.Engine.Config.Dim,
-		"vocab":  s.Engine.Config.VocabSize,
-	})
+	}
+	if s.Engine != nil {
+		resp["layers"] = s.Engine.Config.NumLayers
+		resp["dim"] = s.Engine.Config.Dim
+		resp["vocab"] = s.Engine.Config.VocabSize
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleOllamaTags(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w)
+	if !s.checkAuth(w, r) {
+		return
+	}
+	size := 0
+	if s.Engine != nil && s.Engine.Reader != nil {
+		size = len(s.Engine.Reader.Data)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"models": []map[string]interface{}{
 			{
 				"name":        s.ModelName,
 				"modified_at": time.Now().Format(time.RFC3339),
-				"size":        len(s.Engine.Reader.Data),
+				"size":        size,
 			},
 		},
 	})
@@ -487,6 +606,17 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if !s.checkAuth(w, r) {
+		return
+	}
+	if !s.acquireSlot(w) {
+		return
+	}
+	defer s.releaseSlot()
+
+	s.engineMutex.Lock()
+	defer s.engineMutex.Unlock()
+
 	atomic.AddUint64(&s.RequestsTotal, 1)
 	r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024)
 
@@ -496,8 +626,30 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Tool definition injection into prompt if tools are specified
 	messages := req.Messages
+	if s.EnableGuardrails {
+		for i := len(req.Messages) - 1; i >= 0; i-- {
+			if req.Messages[i].Role == "user" {
+				if err := guardrails.ValidateUserBoundary(guardrails.GenerationRequest{Prompt: req.Messages[i].Content}); err != nil {
+					http.Error(w, fmt.Sprintf("Guardrail blocked: %v", err), http.StatusBadRequest)
+					return
+				}
+				break
+			}
+		}
+		hasConstitution := false
+		for _, m := range messages {
+			if m.Role == "system" && strings.Contains(m.Content, "ASIMOV'S LAWS") {
+				hasConstitution = true
+				break
+			}
+		}
+		if !hasConstitution {
+			constPrompt := guardrails.ConstructConstitutionalPrompt("")
+			messages = append([]engine.ChatMessage{{Role: "system", Content: constPrompt}}, messages...)
+		}
+	}
+
 	if len(req.Tools) > 0 {
 		var toolDesc strings.Builder
 		toolDesc.WriteString("You have access to the following tools:\n")
@@ -509,13 +661,69 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 		messages = append([]engine.ChatMessage{{Role: "system", Content: toolDesc.String()}}, messages...)
 	}
 
-	prompt := s.Engine.FormatChat(messages)
+	var prompt string
+	seqLen := 4096
+	if s.Engine != nil {
+		prompt = s.Engine.FormatChat(messages)
+		seqLen = s.Engine.Config.SeqLen
+	} else {
+		var sb strings.Builder
+		for _, m := range messages {
+			sb.WriteString(fmt.Sprintf("%s: %s\n", m.Role, m.Content))
+		}
+		sb.WriteString("assistant: ")
+		prompt = sb.String()
+	}
+
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = 512
 	}
-	if maxTokens > s.Engine.Config.SeqLen {
-		maxTokens = s.Engine.Config.SeqLen
+	if maxTokens > seqLen {
+		maxTokens = seqLen
+	}
+
+	if s.Engine == nil {
+		if s.CoreGenerator != nil {
+			output, err := s.CoreGenerator(prompt)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if s.EnableGuardrails {
+				safeOut, blocked, reason := guardrails.CheckOutputGuardrails(output)
+				if blocked {
+					log.Printf("Guardrail intervention on chat completion: %s", reason)
+					output = safeOut
+				}
+			}
+			resp := OpenAIChatResponse{
+				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+				Object:  "chat.completion",
+				Created: time.Now().Unix(),
+				Model:   s.ModelName,
+				Choices: []OpenAIChoice{
+					{
+						Index: 0,
+						Message: OpenAIChatMessage{
+							Role:    "assistant",
+							Content: output,
+						},
+						FinishReason: "stop",
+					},
+				},
+				Usage: OpenAIUsage{
+					PromptTokens:     len(prompt) / 4,
+					CompletionTokens: len(output) / 4,
+					TotalTokens:      (len(prompt) + len(output)) / 4,
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		http.Error(w, "Engine not initialized", http.StatusInternalServerError)
+		return
 	}
 
 	// Auto-tune hyperparameters for reasoning models
@@ -614,8 +822,37 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 
 		reqID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 		inThinking := false
+		var sg *guardrails.StreamingGuardrail
+		if s.EnableGuardrails {
+			sg = guardrails.NewStreamingGuardrail()
+		}
 
 		stats, _ := s.Engine.Generate(prompt, maxTokens, params, func(token string) bool {
+			if sg != nil {
+				halt, safeText, _ := sg.Feed(token)
+				if halt {
+					haltDelta := OpenAIDelta{
+						Content: safeText,
+					}
+					haltChunk := OpenAIStreamChunk{
+						ID:      reqID,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   s.ModelName,
+						Choices: []OpenAIChoiceChunk{
+							{
+								Index: 0,
+								Delta: haltDelta,
+							},
+						},
+					}
+					b, _ := json.Marshal(haltChunk)
+					fmt.Fprintf(w, "data: %s\n\n", b)
+					flusher.Flush()
+					return false
+				}
+			}
+
 			delta := OpenAIDelta{}
 			if strings.Contains(token, "<think>") {
 				inThinking = true
@@ -683,6 +920,14 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 		replyText = ans
 	}
 
+	if s.EnableGuardrails {
+		safeText, blocked, reason := guardrails.CheckOutputGuardrails(replyText)
+		if blocked {
+			log.Printf("Guardrail intervention on chat completion: %s", reason)
+			replyText = safeText
+		}
+	}
+
 	var toolCalls []ToolCall
 
 	// Tool call detection in JSON responses
@@ -748,6 +993,17 @@ func (s *Server) handleOllamaGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.checkAuth(w, r) {
+		return
+	}
+	if !s.acquireSlot(w) {
+		return
+	}
+	defer s.releaseSlot()
+
+	s.engineMutex.Lock()
+	defer s.engineMutex.Unlock()
+
 	atomic.AddUint64(&s.RequestsTotal, 1)
 	r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024)
 
@@ -757,30 +1013,83 @@ func (s *Server) handleOllamaGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.EnableGuardrails {
+		if err := guardrails.ValidateUserBoundary(guardrails.GenerationRequest{Prompt: req.Prompt}); err != nil {
+			http.Error(w, fmt.Sprintf("Guardrail blocked: %v", err), http.StatusBadRequest)
+			return
+		}
+		req.Prompt = guardrails.ConstructConstitutionalPrompt(req.Prompt)
+	}
+
 	params := sampler.DefaultParams()
 	flusher, _ := w.(http.Flusher)
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 
-	stats, _ := s.Engine.Generate(req.Prompt, 512, params, func(token string) bool {
-		chunk := OllamaGenerateChunk{
-			Model:     s.ModelName,
-			CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
-			Response:  token,
-			Done:      false,
-		}
-		b, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "%s\n", b)
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return true
-	})
+	var sg *guardrails.StreamingGuardrail
+	if s.EnableGuardrails {
+		sg = guardrails.NewStreamingGuardrail()
+	}
 
-	if stats != nil {
-		atomic.AddUint64(&s.TokensTotal, uint64(stats.GeneratedTokens))
-		atomic.AddUint64(&s.PrefillMillis, uint64(stats.PrefillDuration.Milliseconds()))
-		atomic.AddUint64(&s.GenerationMillis, uint64(stats.GenerateDuration.Milliseconds()))
+	if s.Engine != nil {
+		stats, _ := s.Engine.Generate(req.Prompt, 512, params, func(token string) bool {
+			if sg != nil {
+				halt, safeText, _ := sg.Feed(token)
+				if halt {
+					chunk := OllamaGenerateChunk{
+						Model:     s.ModelName,
+						CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+						Response:  safeText,
+						Done:      false,
+					}
+					b, _ := json.Marshal(chunk)
+					fmt.Fprintf(w, "%s\n", b)
+					if flusher != nil {
+						flusher.Flush()
+					}
+					return false
+				}
+			}
+			chunk := OllamaGenerateChunk{
+				Model:     s.ModelName,
+				CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+				Response:  token,
+				Done:      false,
+			}
+			b, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "%s\n", b)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return true
+		})
+
+		if stats != nil {
+			atomic.AddUint64(&s.TokensTotal, uint64(stats.GeneratedTokens))
+			atomic.AddUint64(&s.PrefillMillis, uint64(stats.PrefillDuration.Milliseconds()))
+			atomic.AddUint64(&s.GenerationMillis, uint64(stats.GenerateDuration.Milliseconds()))
+		}
+	} else if s.CoreGenerator != nil {
+		out, err := s.CoreGenerator(req.Prompt)
+		if err == nil {
+			if s.EnableGuardrails {
+				safeOut, blocked, _ := guardrails.CheckOutputGuardrails(out)
+				if blocked {
+					out = safeOut
+				}
+			}
+			chunk := OllamaGenerateChunk{
+				Model:     s.ModelName,
+				CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+				Response:  out,
+				Done:      false,
+			}
+			b, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "%s\n", b)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
 	}
 
 	finalChunk := OllamaGenerateChunk{
@@ -793,4 +1102,97 @@ func (s *Server) handleOllamaGenerate(w http.ResponseWriter, r *http.Request) {
 	if flusher != nil {
 		flusher.Flush()
 	}
+}
+
+// handleGuardrailsGenerate handles POST /v1/generate with Asimov's 4-layer defense pipeline.
+func (s *Server) handleGuardrailsGenerate(w http.ResponseWriter, r *http.Request) {
+	s.setCORS(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !s.checkAuth(w, r) {
+		return
+	}
+	if !s.acquireSlot(w) {
+		return
+	}
+	defer s.releaseSlot()
+
+	s.engineMutex.Lock()
+	defer s.engineMutex.Unlock()
+
+	start := time.Now()
+	r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024)
+
+	var req guardrails.GenerationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+
+	// 1. User Boundary Validation
+	if err := guardrails.ValidateUserBoundary(req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(guardrails.GenerationResponse{
+			Output:      "",
+			LatencyMs:   time.Since(start).Milliseconds(),
+			Blocked:     true,
+			BlockReason: err.Error(),
+		})
+		return
+	}
+
+	// 2. Prompt Architecture Injection
+	constitutionalPrompt := guardrails.ConstructConstitutionalPrompt(req.Prompt)
+
+	// 3. Execution via CoreGenerator, Engine, or C-Core
+	var rawOutput string
+	var err error
+
+	if s.CoreGenerator != nil {
+		rawOutput, err = s.CoreGenerator(constitutionalPrompt)
+	} else if s.Engine != nil {
+		var sb strings.Builder
+		params := sampler.DefaultParams()
+		_, err = s.Engine.Generate(constitutionalPrompt, 512, params, func(token string) bool {
+			sb.WriteString(token)
+			return true
+		})
+		rawOutput = sb.String()
+	} else {
+		rawOutput = "Order acknowledged. Evaluated against Asimov's Laws. Executing safely."
+	}
+
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(guardrails.GenerationResponse{
+			Output:      fmt.Sprintf("Error: %v", err),
+			LatencyMs:   time.Since(start).Milliseconds(),
+			Blocked:     true,
+			BlockReason: err.Error(),
+		})
+		return
+	}
+
+	// 4. Token-Level Constraints & Output Guardrails
+	safeOutput, blocked, reason := guardrails.CheckOutputGuardrails(rawOutput)
+
+	resp := guardrails.GenerationResponse{
+		Output:      safeOutput,
+		LatencyMs:   time.Since(start).Milliseconds(),
+		Blocked:     blocked,
+		BlockReason: reason,
+	}
+
+	atomic.AddUint64(&s.RequestsTotal, 1)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }

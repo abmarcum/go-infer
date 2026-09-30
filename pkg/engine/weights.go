@@ -337,7 +337,47 @@ func (w *Weights) MatMulBatch(y, x []float32, tensorName string, batchSize, rows
 	raw := w.RawWeights[resolvedName]
 
 	if metal.IsAvailable() {
+		if buf, ok := w.GPUBufs[resolvedName]; ok && buf != nil {
+			if err := metal.MatMulBatchBuf(int(info.Type), y, x, buf, batchSize, rows, cols); err == nil {
+				return true
+			}
+		}
 		if err := metal.MatMulBatch(y, x, raw, info.Type, batchSize, rows, cols); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// MatMulFusedGateUpBatch executes fused Gate + Up GEMM + SwiGLU:
+// Y (batch x rows) = SwiGLU(X * W_gate^T, X * W_up^T)
+func (w *Weights) MatMulFusedGateUpBatch(y, x []float32, gateTensor, upTensor string, batchSize, rows, cols int) bool {
+	if !metal.IsAvailable() {
+		return false
+	}
+	rGate, ok := w.ResolveTensorName(gateTensor)
+	if !ok {
+		return false
+	}
+	rUp, ok := w.ResolveTensorName(upTensor)
+	if !ok {
+		return false
+	}
+	infoGate, ok := w.Meta[rGate]
+	if !ok {
+		return false
+	}
+	infoUp, ok := w.Meta[rUp]
+	if !ok {
+		return false
+	}
+	if infoGate.Type != infoUp.Type {
+		return false
+	}
+	bufGate := w.GPUBufs[rGate]
+	bufUp := w.GPUBufs[rUp]
+	if bufGate != nil && bufUp != nil {
+		if err := metal.MatMulFusedGateUpBatchBuf(int(infoGate.Type), y, x, bufGate, bufUp, batchSize, rows, cols); err == nil {
 			return true
 		}
 	}

@@ -391,3 +391,97 @@ func TestEngineGenerateWithTools(t *testing.T) {
 	}
 }
 
+func TestQwen35HybridArchitecture(t *testing.T) {
+	cfg := ModelConfig{
+		Architecture:          "qwen35",
+		Dim:                   5120,
+		HiddenDim:             17408,
+		NumLayers:             65,
+		NumHeads:              24,
+		NumKVHeads:            4,
+		VocabSize:             248320,
+		SeqLen:                2048,
+		FullAttentionInterval: 4,
+		SSMInnerSize:          6144,
+		SSMConvKernel:         4,
+		SSMStateSize:          128,
+		SSMGroupCount:         16,
+		SSMTimeStepRank:       48,
+		RopeDim:               64,
+	}
+
+	// Verify head and attention dimensions
+	if cfg.HeadDim() != 256 {
+		t.Errorf("Expected HeadDim 256, got %d", cfg.HeadDim())
+	}
+	if cfg.AttnDim() != 6144 {
+		t.Errorf("Expected AttnDim 6144, got %d", cfg.AttnDim())
+	}
+	if cfg.KVDim() != 1024 {
+		t.Errorf("Expected KVDim 1024, got %d", cfg.KVDim())
+	}
+	if cfg.KVMul() != 6 {
+		t.Errorf("Expected KVMul 6, got %d", cfg.KVMul())
+	}
+
+	// Verify hybrid layer classification
+	for l := 0; l < 12; l++ {
+		isSSM := cfg.IsSSMLayer(l)
+		if (l+1)%4 == 0 {
+			if isSSM {
+				t.Errorf("Layer %d should be full attention checkpoint, but IsSSMLayer returned true", l)
+			}
+		} else {
+			if !isSSM {
+				t.Errorf("Layer %d should be SSM layer, but IsSSMLayer returned false", l)
+			}
+		}
+	}
+
+	// Verify Arena allocation
+	arena := NewMemoryArena(cfg)
+	if len(arena.SSMQKV) != 10240 {
+		t.Errorf("Expected SSMQKV len 10240, got %d", len(arena.SSMQKV))
+	}
+	if len(arena.SSMGate) != 6144 {
+		t.Errorf("Expected SSMGate len 6144, got %d", len(arena.SSMGate))
+	}
+	if len(arena.SSMOut) != 6144 {
+		t.Errorf("Expected SSMOut len 6144, got %d", len(arena.SSMOut))
+	}
+	if len(arena.SSMBeta) != 48 {
+		t.Errorf("Expected SSMBeta len 48, got %d", len(arena.SSMBeta))
+	}
+	if len(arena.AttnGate) != 6144 {
+		t.Errorf("Expected AttnGate len 6144, got %d", len(arena.AttnGate))
+	}
+	if len(arena.Q) < 12288 {
+		t.Errorf("Expected Q buffer >= 12288, got %d", len(arena.Q))
+	}
+
+	// Verify KVCache SSM initialization
+	kv := NewKVCache(cfg.NumLayers, cfg.SeqLen, cfg.KVDim())
+	ssmChannels := cfg.SSMInnerSize + 2*cfg.SSMGroupCount*cfg.SSMStateSize
+	kv.InitSSM(cfg.NumLayers, cfg.SSMConvKernel, ssmChannels, cfg.SSMInnerSize, cfg.SSMStateSize)
+
+	if kv.SSM == nil {
+		t.Fatalf("Expected kv.SSM to be initialized")
+	}
+	if len(kv.SSM.ConvState) != cfg.NumLayers {
+		t.Errorf("Expected %d ConvState layers, got %d", cfg.NumLayers, len(kv.SSM.ConvState))
+	}
+	if len(kv.SSM.SSMState) != cfg.NumLayers {
+		t.Errorf("Expected %d SSMState layers, got %d", cfg.NumLayers, len(kv.SSM.SSMState))
+	}
+
+	// Test deep-copy cloning
+	clone := kv.Clone()
+	if clone.SSM == nil {
+		t.Fatalf("Expected clone.SSM to be initialized")
+	}
+	if len(clone.SSM.SSMState) != cfg.NumLayers {
+		t.Errorf("Expected clone %d SSMState layers, got %d", cfg.NumLayers, len(clone.SSM.SSMState))
+	}
+}
+
+

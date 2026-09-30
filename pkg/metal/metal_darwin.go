@@ -128,6 +128,7 @@ func (p *PreallocatedLayers) Free() {
 // TransformerParams bundles all parameters and handles for a full-model forward pass.
 type TransformerParams struct {
 	InitialX, OutLogits                         []float32
+	OutToken                                    *uint32
 	Layers                                      []LayerWeights
 	PreallocatedLayers                          *PreallocatedLayers
 	OutputNormBuf, OutputWeightBuf              unsafe.Pointer
@@ -182,9 +183,19 @@ func ForwardTransformer(p *TransformerParams) error {
 		return errUnsupported
 	}
 
+	var logitsPtr *C.float
+	if len(p.OutLogits) > 0 {
+		logitsPtr = (*C.float)(&p.OutLogits[0])
+	}
+	var tokenPtr *C.uint32_t
+	if p.OutToken != nil {
+		tokenPtr = (*C.uint32_t)(unsafe.Pointer(p.OutToken))
+	}
+
 	ret := C.metal_forward_transformer(
 		(*C.float)(&p.InitialX[0]),
-		(*C.float)(&p.OutLogits[0]),
+		logitsPtr,
+		tokenPtr,
 		layersPtr,
 		C.metal_buffer_t(p.OutputNormBuf),
 		C.metal_buffer_t(p.OutputWeightBuf),
@@ -210,6 +221,232 @@ func ForwardTransformer(p *TransformerParams) error {
 	}
 	return nil
 }
+
+// Qwen35LayerWeights holds persistent GPU buffer handles and quantization types for a hybrid layer.
+type Qwen35LayerWeights struct {
+	IsSSM bool
+
+	AttnNormBuf unsafe.Pointer
+	FFNNormBuf  unsafe.Pointer
+
+	// SSM layer weights
+	SSMGateBuf   unsafe.Pointer
+	SSMGateType  int
+	SSMQKVBuf    unsafe.Pointer
+	SSMQKVType   int
+	SSMConv1DBuf unsafe.Pointer
+	SSMAlphaBuf  unsafe.Pointer
+	SSMAlphaType int
+	SSMBetaBuf   unsafe.Pointer
+	SSMBetaType  int
+	SSMDTBiasBuf unsafe.Pointer
+	SSMABuf      unsafe.Pointer
+	SSMNormBuf   unsafe.Pointer
+	SSMOutBuf    unsafe.Pointer
+	SSMOutType   int
+
+	// Attention layer weights
+	WQBuf    unsafe.Pointer
+	WQType   int
+	WKBuf    unsafe.Pointer
+	WKType   int
+	WVBuf    unsafe.Pointer
+	WVType   int
+	WOBuf    unsafe.Pointer
+	WOType   int
+	QNormBuf unsafe.Pointer
+	KNormBuf unsafe.Pointer
+
+	// FFN weights (shared by both)
+	FFNGateBuf  unsafe.Pointer
+	FFNGateType int
+	FFNUpBuf    unsafe.Pointer
+	FFNUpType   int
+	FFNDownBuf  unsafe.Pointer
+	FFNDownType int
+}
+
+// PreallocatedQwen35Layers stores a C-pinned array of Qwen3.5 layer weight handles.
+type PreallocatedQwen35Layers struct {
+	ptr unsafe.Pointer
+	len int
+}
+
+// NewPreallocatedQwen35Layers pre-packs Qwen35LayerWeights into a persistent C-allocated buffer.
+func NewPreallocatedQwen35Layers(layers []Qwen35LayerWeights) *PreallocatedQwen35Layers {
+	if len(layers) == 0 {
+		return nil
+	}
+	size := len(layers) * int(unsafe.Sizeof(C.metal_qwen35_layer_weights_t{}))
+	cPtr := C.malloc(C.size_t(size))
+	cSlice := (*[1 << 20]C.metal_qwen35_layer_weights_t)(cPtr)[:len(layers):len(layers)]
+	for i, l := range layers {
+		cSlice[i].is_ssm = C.bool(l.IsSSM)
+		cSlice[i].attn_norm = C.metal_buffer_t(l.AttnNormBuf)
+		cSlice[i].ffn_norm = C.metal_buffer_t(l.FFNNormBuf)
+
+		cSlice[i].ssm_gate = C.metal_buffer_t(l.SSMGateBuf)
+		cSlice[i].ssm_gate_type = C.int(l.SSMGateType)
+		cSlice[i].ssm_qkv = C.metal_buffer_t(l.SSMQKVBuf)
+		cSlice[i].ssm_qkv_type = C.int(l.SSMQKVType)
+		cSlice[i].ssm_conv1d = C.metal_buffer_t(l.SSMConv1DBuf)
+		cSlice[i].ssm_alpha = C.metal_buffer_t(l.SSMAlphaBuf)
+		cSlice[i].ssm_alpha_type = C.int(l.SSMAlphaType)
+		cSlice[i].ssm_beta = C.metal_buffer_t(l.SSMBetaBuf)
+		cSlice[i].ssm_beta_type = C.int(l.SSMBetaType)
+		cSlice[i].ssm_dt_bias = C.metal_buffer_t(l.SSMDTBiasBuf)
+		cSlice[i].ssm_a = C.metal_buffer_t(l.SSMABuf)
+		cSlice[i].ssm_norm = C.metal_buffer_t(l.SSMNormBuf)
+		cSlice[i].ssm_out = C.metal_buffer_t(l.SSMOutBuf)
+		cSlice[i].ssm_out_type = C.int(l.SSMOutType)
+
+		cSlice[i].wq = C.metal_buffer_t(l.WQBuf)
+		cSlice[i].wq_type = C.int(l.WQType)
+		cSlice[i].wk = C.metal_buffer_t(l.WKBuf)
+		cSlice[i].wk_type = C.int(l.WKType)
+		cSlice[i].wv = C.metal_buffer_t(l.WVBuf)
+		cSlice[i].wv_type = C.int(l.WVType)
+		cSlice[i].wo = C.metal_buffer_t(l.WOBuf)
+		cSlice[i].wo_type = C.int(l.WOType)
+		cSlice[i].q_norm = C.metal_buffer_t(l.QNormBuf)
+		cSlice[i].k_norm = C.metal_buffer_t(l.KNormBuf)
+
+		cSlice[i].ffn_gate = C.metal_buffer_t(l.FFNGateBuf)
+		cSlice[i].ffn_gate_type = C.int(l.FFNGateType)
+		cSlice[i].ffn_up = C.metal_buffer_t(l.FFNUpBuf)
+		cSlice[i].ffn_up_type = C.int(l.FFNUpType)
+		cSlice[i].ffn_down = C.metal_buffer_t(l.FFNDownBuf)
+		cSlice[i].ffn_down_type = C.int(l.FFNDownType)
+	}
+	return &PreallocatedQwen35Layers{ptr: cPtr, len: len(layers)}
+}
+
+// Free releases the C memory allocated for pre-packed Qwen 3.5 layers.
+func (p *PreallocatedQwen35Layers) Free() {
+	if p != nil && p.ptr != nil {
+		C.free(p.ptr)
+		p.ptr = nil
+	}
+}
+
+// Qwen35TransformerParams bundles all parameters and handles for a full Qwen 3.5 forward pass.
+type Qwen35TransformerParams struct {
+	InitialX, OutLogits                         []float32
+	TokenEmbdBuf                                unsafe.Pointer
+	TokenID                                     int
+	OutToken                                    *uint32
+	Layers                                      []Qwen35LayerWeights
+	PreallocatedLayers                          *PreallocatedQwen35Layers
+	OutputNormBuf, OutputWeightBuf              unsafe.Pointer
+	OutputWeightType                            int
+	NumLayers, Dim, HiddenDim                   int
+	SSMInner, SSMChannels, SSMStateSize         int
+	SSMGroups, SSMRank                          int
+	KVDim, VocabSize                            int
+	NumHeads, NumKVHeads, HeadDim, RopeDim      int
+	Pos, Slot, MaxSeq, ActiveContext            int
+	NormEps, RopeTheta, AttnScale               float32
+}
+
+// ForwardQwen35 executes all 65 hybrid transformer layers on the GPU in a single CGo call.
+func ForwardQwen35(p *Qwen35TransformerParams) error {
+	if !IsAvailable() || p == nil {
+		return errUnsupported
+	}
+	if p.OutputNormBuf == nil || p.OutputWeightBuf == nil {
+		return errUnsupported
+	}
+
+	var layersPtr *C.metal_qwen35_layer_weights_t
+	if p.PreallocatedLayers != nil && p.PreallocatedLayers.ptr != nil {
+		layersPtr = (*C.metal_qwen35_layer_weights_t)(p.PreallocatedLayers.ptr)
+	} else {
+		return errUnsupported
+	}
+
+	var initialXPtr *C.float
+	if len(p.InitialX) > 0 {
+		initialXPtr = (*C.float)(&p.InitialX[0])
+	}
+	var tokenEmbdBufPtr C.metal_buffer_t
+	if p.TokenEmbdBuf != nil {
+		tokenEmbdBufPtr = C.metal_buffer_t(p.TokenEmbdBuf)
+	}
+
+	var logitsPtr *C.float
+	if len(p.OutLogits) > 0 {
+		logitsPtr = (*C.float)(&p.OutLogits[0])
+	}
+	var tokenPtr *C.uint32_t
+	if p.OutToken != nil {
+		tokenPtr = (*C.uint32_t)(unsafe.Pointer(p.OutToken))
+	}
+
+	ret := C.metal_forward_qwen35(
+		initialXPtr,
+		tokenEmbdBufPtr,
+		C.int32_t(p.TokenID),
+		logitsPtr,
+		tokenPtr,
+		layersPtr,
+		C.metal_buffer_t(p.OutputNormBuf),
+		C.metal_buffer_t(p.OutputWeightBuf),
+		C.int(p.OutputWeightType),
+		C.uint32_t(p.NumLayers),
+		C.uint32_t(p.Dim),
+		C.uint32_t(p.HiddenDim),
+		C.uint32_t(p.SSMInner),
+		C.uint32_t(p.SSMChannels),
+		C.uint32_t(p.SSMStateSize),
+		C.uint32_t(p.SSMGroups),
+		C.uint32_t(p.SSMRank),
+		C.uint32_t(p.KVDim),
+		C.uint32_t(p.VocabSize),
+		C.uint32_t(p.NumHeads),
+		C.uint32_t(p.NumKVHeads),
+		C.uint32_t(p.HeadDim),
+		C.uint32_t(p.RopeDim),
+		C.uint32_t(p.Pos),
+		C.uint32_t(p.Slot),
+		C.uint32_t(p.MaxSeq),
+		C.uint32_t(p.ActiveContext),
+		C.float(p.NormEps),
+		C.float(p.RopeTheta),
+		C.float(p.AttnScale),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_forward_qwen35 failed: %d", int(ret))
+	}
+	return nil
+}
+
+// AllocQwen35Buffers pre-allocates permanent GPU buffers for Qwen 3.5 hybrid architecture.
+func AllocQwen35Buffers(dim, hiddenDim, ssmInner, ssmChannels, ssmRank, ssmStateSize, kvDim, vocabSize, numLayers, maxSeq int) error {
+	ret := C.metal_alloc_qwen35_buffers(
+		C.uint32_t(dim),
+		C.uint32_t(hiddenDim),
+		C.uint32_t(ssmInner),
+		C.uint32_t(ssmChannels),
+		C.uint32_t(ssmRank),
+		C.uint32_t(ssmStateSize),
+		C.uint32_t(kvDim),
+		C.uint32_t(vocabSize),
+		C.uint32_t(numLayers),
+		C.uint32_t(maxSeq),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_alloc_qwen35_buffers failed: %d", int(ret))
+	}
+	return nil
+}
+
+// ResetSSMState zeroes out recurrent SSM states in GPU memory.
+func ResetSSMState() {
+	if IsAvailable() {
+		C.metal_reset_ssm_state()
+	}
+}
+
 type LayerParams struct {
 	X, XNorm, Q, K, V, AttnOut, AttnProj, FFNGate, FFNUp, FFNDown []float32
 	AttnNorm, FFNNorm                                             []float32
@@ -303,6 +540,47 @@ func MatMulBuf(quantType int, y, x []float32, wBuf unsafe.Pointer, rows, cols in
 	return nil
 }
 
+// MatMulBatchBuf runs batched GEMM directly using a pre-allocated GPU buffer handle.
+func MatMulBatchBuf(quantType int, y, x []float32, wBuf unsafe.Pointer, batchSize, rows, cols int) error {
+	if !IsAvailable() || len(y) < batchSize*rows || len(x) < batchSize*cols || wBuf == nil {
+		return errUnsupported
+	}
+	ret := C.metal_gemm_buf(
+		C.int(quantType),
+		(*C.float)(&y[0]),
+		(*C.float)(&x[0]),
+		C.metal_buffer_t(wBuf),
+		C.uint32_t(batchSize),
+		C.uint32_t(rows),
+		C.uint32_t(cols),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_gemm_buf failed: %d", int(ret))
+	}
+	return nil
+}
+
+// MatMulFusedGateUpBatchBuf runs batched fused Gate+Up+SwiGLU directly using pre-allocated GPU buffer handles.
+func MatMulFusedGateUpBatchBuf(quantType int, y, x []float32, gateBuf, upBuf unsafe.Pointer, batchSize, rows, cols int) error {
+	if !IsAvailable() || len(y) < batchSize*rows || len(x) < batchSize*cols || gateBuf == nil || upBuf == nil {
+		return errUnsupported
+	}
+	ret := C.metal_gemm_fused_gate_up_buf(
+		C.int(quantType),
+		(*C.float)(&y[0]),
+		(*C.float)(&x[0]),
+		C.metal_buffer_t(gateBuf),
+		C.metal_buffer_t(upBuf),
+		C.uint32_t(batchSize),
+		C.uint32_t(rows),
+		C.uint32_t(cols),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_gemm_fused_gate_up_buf failed: %d", int(ret))
+	}
+	return nil
+}
+
 // AllocBuffers pre-allocates permanent GPU buffers for intermediate activations and KV-cache.
 func AllocBuffers(dim, hiddenDim, kvDim, vocabSize, numLayers, maxSeq int) error {
 	ret := C.metal_alloc_buffers(
@@ -346,6 +624,68 @@ func RMSNorm(out, x, weight []float32, dim int, eps float32) error {
 	)
 	if ret != 0 {
 		return fmt.Errorf("metal_rmsnorm failed: %d", int(ret))
+	}
+	return nil
+}
+
+// RMSNormBatch computes RMSNorm across a batch of vectors on the GPU.
+func RMSNormBatch(out, x, weight []float32, dim int, eps float32, batchSize int) error {
+	if !IsAvailable() || len(out) < batchSize*dim || len(x) < batchSize*dim || len(weight) < dim || batchSize <= 0 {
+		return errUnsupported
+	}
+	ret := C.metal_rmsnorm_batch(
+		(*C.float)(unsafe.Pointer(&out[0])),
+		(*C.float)(unsafe.Pointer(&x[0])),
+		(*C.float)(unsafe.Pointer(&weight[0])),
+		C.uint32_t(dim),
+		C.float(eps),
+		C.uint32_t(batchSize),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_rmsnorm_batch failed: %d", int(ret))
+	}
+	return nil
+}
+
+// ResidualRMSNormBatch fuses residual addition (x += proj) and subsequent RMSNorm (out_norm = rmsnorm(x)) across a batch.
+func ResidualRMSNormBatch(x, proj, outNorm, weight []float32, dim int, eps float32, batchSize int) error {
+	if !IsAvailable() || len(x) < batchSize*dim || len(proj) < batchSize*dim || len(outNorm) < batchSize*dim || len(weight) < dim || batchSize <= 0 {
+		return errUnsupported
+	}
+	ret := C.metal_residual_rmsnorm_batch(
+		(*C.float)(unsafe.Pointer(&x[0])),
+		(*C.float)(unsafe.Pointer(&proj[0])),
+		(*C.float)(unsafe.Pointer(&outNorm[0])),
+		(*C.float)(unsafe.Pointer(&weight[0])),
+		C.uint32_t(dim),
+		C.float(eps),
+		C.uint32_t(batchSize),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_residual_rmsnorm_batch failed: %d", int(ret))
+	}
+	return nil
+}
+
+// EmbedLookupQ4KBatch extracts embeddings for a batch of token IDs directly on the GPU.
+func EmbedLookupQ4KBatch(outX []float32, wEmbd unsafe.Pointer, tokenIDs []int, dim int) error {
+	batchSize := len(tokenIDs)
+	if !IsAvailable() || len(outX) < batchSize*dim || wEmbd == nil || batchSize <= 0 {
+		return errUnsupported
+	}
+	uTokens := make([]uint32, batchSize)
+	for i, t := range tokenIDs {
+		uTokens[i] = uint32(t)
+	}
+	ret := C.metal_embed_lookup_q4_k_batch(
+		(*C.float)(unsafe.Pointer(&outX[0])),
+		C.metal_buffer_t(wEmbd),
+		(*C.uint32_t)(unsafe.Pointer(&uTokens[0])),
+		C.uint32_t(dim),
+		C.uint32_t(batchSize),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_embed_lookup_q4_k_batch failed: %d", int(ret))
 	}
 	return nil
 }
@@ -558,3 +898,152 @@ func MatMulBatch(y, x []float32, rawW []byte, qType uint32, batchSize, rows, col
 	}
 	return nil
 }
+
+// Conv1DBatch executes 1D causal convolution across a batch on the GPU.
+func Conv1DBatch(out, in, state, convWeight []float32, kernelSize, channels, batchSize int) error {
+	var statePtr *C.float
+	if len(state) > 0 {
+		statePtr = (*C.float)(unsafe.Pointer(&state[0]))
+	}
+	ret := C.metal_conv1d_batch(
+		(*C.float)(unsafe.Pointer(&out[0])),
+		(*C.float)(unsafe.Pointer(&in[0])),
+		statePtr,
+		(*C.float)(unsafe.Pointer(&convWeight[0])),
+		C.uint32_t(kernelSize),
+		C.uint32_t(channels),
+		C.uint32_t(batchSize),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_conv1d_batch failed: %d", int(ret))
+	}
+	return nil
+}
+
+// SSMRecurrenceBatch executes Gated DeltaNet recurrent SSM updates across a batch on the GPU.
+func SSMRecurrenceBatch(ssmOut, convOut, alpha, beta, dtBias, ssmA, normW, gate, ssmState []float32, ssmInner, ssmStateSize, ssmGroups, ssmRank int, eps float32, batchSize, ssmChannels int) error {
+	var betaPtr, dtBiasPtr, ssmAPtr, normWPtr *C.float
+	if len(beta) > 0 {
+		betaPtr = (*C.float)(unsafe.Pointer(&beta[0]))
+	}
+	if len(dtBias) > 0 {
+		dtBiasPtr = (*C.float)(unsafe.Pointer(&dtBias[0]))
+	}
+	if len(ssmA) > 0 {
+		ssmAPtr = (*C.float)(unsafe.Pointer(&ssmA[0]))
+	}
+	if len(normW) > 0 {
+		normWPtr = (*C.float)(unsafe.Pointer(&normW[0]))
+	}
+	ret := C.metal_ssm_recurrence_batch(
+		(*C.float)(unsafe.Pointer(&ssmOut[0])),
+		(*C.float)(unsafe.Pointer(&convOut[0])),
+		(*C.float)(unsafe.Pointer(&alpha[0])),
+		betaPtr,
+		dtBiasPtr,
+		ssmAPtr,
+		normWPtr,
+		(*C.float)(unsafe.Pointer(&gate[0])),
+		(*C.float)(unsafe.Pointer(&ssmState[0])),
+		C.uint32_t(ssmInner),
+		C.uint32_t(ssmStateSize),
+		C.uint32_t(ssmGroups),
+		C.uint32_t(ssmRank),
+		C.float(eps),
+		C.uint32_t(batchSize),
+		C.uint32_t(ssmChannels),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_ssm_recurrence_batch failed: %d", int(ret))
+	}
+	return nil
+}
+
+// AttentionGQABatch executes online FlashAttention with GQA for a batch on the GPU.
+func AttentionGQABatch(attnOut, q, kCache, vCache []float32, numHeads, numKVHeads, headDim, startPos, maxSeq int, attnScale float32, batchSize int) error {
+	ret := C.metal_attention_gqa_batch(
+		(*C.float)(unsafe.Pointer(&attnOut[0])),
+		(*C.float)(unsafe.Pointer(&q[0])),
+		(*C.float)(unsafe.Pointer(&kCache[0])),
+		(*C.float)(unsafe.Pointer(&vCache[0])),
+		C.uint32_t(numHeads),
+		C.uint32_t(numKVHeads),
+		C.uint32_t(headDim),
+		C.uint32_t(startPos),
+		C.uint32_t(maxSeq),
+		C.float(attnScale),
+		C.uint32_t(batchSize),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_attention_gqa_batch failed: %d", int(ret))
+	}
+	return nil
+}
+
+// KVWriteBatch writes batched key and value vectors into the persistent KV cache on the GPU.
+func KVWriteBatch(kCache, vCache, k, v []float32, startPos, maxSeq, kvDim, batchSize int) error {
+	ret := C.metal_kv_write_batch(
+		(*C.float)(unsafe.Pointer(&kCache[0])),
+		(*C.float)(unsafe.Pointer(&vCache[0])),
+		(*C.float)(unsafe.Pointer(&k[0])),
+		(*C.float)(unsafe.Pointer(&v[0])),
+		C.uint32_t(startPos),
+		C.uint32_t(maxSeq),
+		C.uint32_t(kvDim),
+		C.uint32_t(batchSize),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_kv_write_batch failed: %d", int(ret))
+	}
+	return nil
+}
+
+// SplitQGateBatch deinterleaves Q and Gate for a batch on the GPU.
+func SplitQGateBatch(qOut, gateOut, qGateIn []float32, numTokens int) error {
+	ret := C.metal_qwen35_split_q_gate_batch(
+		(*C.float)(unsafe.Pointer(&qOut[0])),
+		(*C.float)(unsafe.Pointer(&gateOut[0])),
+		(*C.float)(unsafe.Pointer(&qGateIn[0])),
+		C.uint32_t(numTokens),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_qwen35_split_q_gate_batch failed: %d", int(ret))
+	}
+	return nil
+}
+
+// RoPENormBatch performs per-head RMSNorm and rotary position embedding for a batch on the GPU.
+func RoPENormBatch(q, k, qNormW, kNormW []float32, startPos, numHeads, numKVHeads, headDim, ropeDim int, theta, eps float32, batchSize int) error {
+	ret := C.metal_rope_norm_batch(
+		(*C.float)(unsafe.Pointer(&q[0])),
+		(*C.float)(unsafe.Pointer(&k[0])),
+		(*C.float)(unsafe.Pointer(&qNormW[0])),
+		(*C.float)(unsafe.Pointer(&kNormW[0])),
+		C.uint32_t(startPos),
+		C.uint32_t(numHeads),
+		C.uint32_t(numKVHeads),
+		C.uint32_t(headDim),
+		C.uint32_t(ropeDim),
+		C.float(theta),
+		C.float(eps),
+		C.uint32_t(batchSize),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_rope_norm_batch failed: %d", int(ret))
+	}
+	return nil
+}
+
+// AttnGate applies post-attention element-wise sigmoid gating on the GPU.
+func AttnGate(attnOut, gate []float32, totalElements int) error {
+	ret := C.metal_qwen35_attn_gate(
+		(*C.float)(unsafe.Pointer(&attnOut[0])),
+		(*C.float)(unsafe.Pointer(&gate[0])),
+		C.uint32_t(totalElements),
+	)
+	if ret != 0 {
+		return fmt.Errorf("metal_qwen35_attn_gate failed: %d", int(ret))
+	}
+	return nil
+}
+

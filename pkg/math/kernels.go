@@ -68,3 +68,44 @@ func Softmax(x []float32) {
 		}
 	}
 }
+
+// SiLU computes in-place SiLU activation: x[i] = x[i] / (1 + exp(-x[i]))
+func SiLU(x []float32) {
+	for i, v := range x {
+		x[i] = v / (1.0 + float32(math.Exp(float64(-v))))
+	}
+}
+
+// Sigmoid computes in-place Sigmoid activation: x[i] = 1 / (1 + exp(-x[i]))
+func Sigmoid(x []float32) {
+	for i, v := range x {
+		x[i] = 1.0 / (1.0 + float32(math.Exp(float64(-v))))
+	}
+}
+
+// Conv1DStep performs a 1D depthwise causal convolution step for autoregressive decode.
+// state holds (kernelSize - 1) * channels floats representing past token inputs.
+// convWeight has shape [kernelSize, channels].
+func Conv1DStep(out, in, state, convWeight []float32, kernelSize, channels int) {
+	histLen := kernelSize - 1
+	for c := 0; c < channels; c++ {
+		var sum float32 = 0
+		if len(convWeight) >= kernelSize*channels {
+			for k := 0; k < histLen; k++ {
+				sum += convWeight[c*kernelSize+k] * state[k*channels+c]
+			}
+			sum += convWeight[c*kernelSize+histLen] * in[c]
+		} else {
+			sum = in[c]
+		}
+		// SiLU activation: sum / (1 + exp(-sum))
+		out[c] = sum / (1.0 + float32(math.Exp(float64(-sum))))
+	}
+	// Update state window: shift older entries left, put current 'in' at end
+	for k := 0; k < histLen-1; k++ {
+		copy(state[k*channels:(k+1)*channels], state[(k+1)*channels:(k+2)*channels])
+	}
+	if histLen > 0 {
+		copy(state[(histLen-1)*channels:histLen*channels], in[:channels])
+	}
+}

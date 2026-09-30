@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"go-inference/pkg/downloader"
 	"go-inference/pkg/engine"
+	"go-inference/pkg/guardrails"
 	"go-inference/pkg/metal"
 	"go-inference/pkg/reasoning"
 	"go-inference/pkg/sampler"
@@ -46,8 +47,12 @@ func main() {
 		tpRank         int
 		tpPeers        string
 		bestOfN        int
-		reasoningMode  bool
-		enableCalc     bool
+		reasoningMode    bool
+		enableCalc       bool
+		enableGuardrails bool
+		cCoreMode        bool
+		apiKey           string
+		constitutionPath string
 	)
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit")
@@ -56,6 +61,8 @@ func main() {
 	flag.StringVar(&promptText, "prompt", "", "Prompt text to generate completion for")
 	flag.StringVar(&serveAddr, "serve", "", "Start HTTP OpenAI & Ollama compatible server on address (e.g. :8080)")
 	flag.StringVar(&corsOrigin, "cors-origin", "*", "Allowed CORS origin header for HTTP API")
+	flag.StringVar(&apiKey, "api-key", "", "API key required for authenticating requests via Bearer token (or set GO_INFER_API_KEY)")
+	flag.StringVar(&constitutionPath, "constitution", "", "Path to custom constitution file for guardrails")
 	flag.IntVar(&numThreads, "threads", runtime.NumCPU(), "Number of CPU worker threads for GEMV")
 	flag.IntVar(&maxTokens, "max-tokens", 256, "Maximum tokens to generate")
 	flag.Float64Var(&temperature, "temp", 0.7, "Sampling temperature (0.0 for greedy)")
@@ -66,6 +73,9 @@ func main() {
 	flag.IntVar(&bestOfN, "best-of-n", 1, "Run self-consistency majority voting with N candidate chains")
 	flag.BoolVar(&reasoningMode, "reasoning", false, "Enable reasoning mode (optimal hyperparameters for CoT models e.g. DeepSeek-R1)")
 	flag.BoolVar(&enableCalc, "calc", false, "Enable embedded math/calculator evaluation tool loop")
+	flag.BoolVar(&enableGuardrails, "guardrails", false, "Enable Asimov's Three Laws runtime guardrails on prompt, server, and interactive mode")
+	flag.BoolVar(&enableGuardrails, "asimov", false, "Enable Asimov's Three Laws runtime guardrails (alias)")
+	flag.BoolVar(&cCoreMode, "c-core", false, "Use hybrid C open-weights inference engine core (inference_core.c)")
 
 	// Distributed inference flags
 	flag.StringVar(&distMode, "dist-mode", "none", "Distributed inference mode: none, speculative, pipeline, tensor-parallel")
@@ -103,6 +113,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  Local Prompt:   go-infer [flags] <path-to-gguf> \"<prompt>\"\n")
 		fmt.Fprintf(os.Stderr, "  Interactive:    go-infer [flags] <path-to-gguf>\n")
 		fmt.Fprintf(os.Stderr, "  HTTP Server:    go-infer --serve :8080 <path-to-gguf>\n")
+		fmt.Fprintf(os.Stderr, "  Asimov Guard:   go-infer --guardrails <path-to-gguf> \"<prompt>\"\n")
+		fmt.Fprintf(os.Stderr, "  Hybrid C Core:  go-infer --c-core --serve :8080\n")
 		fmt.Fprintf(os.Stderr, "  Speculative:    go-infer --dist-mode speculative --draft-server http://draft:8080 <path-to-gguf> \"<prompt>\"\n")
 		fmt.Fprintf(os.Stderr, "  Pipeline Stage: go-infer --serve :8080 --pipeline-layers 0-19 --pipeline-next http://stage2:8080 <path-to-gguf>\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
@@ -111,6 +123,30 @@ func main() {
 
 	flag.Parse()
 
+	if apiKey == "" {
+		apiKey = os.Getenv("GO_INFER_API_KEY")
+	}
+	if constitutionPath != "" {
+		content, err := os.ReadFile(constitutionPath)
+		if err != nil {
+			log.Fatalf("Failed to read constitution file from %s: %v", constitutionPath, err)
+		}
+		var laws []string
+		for _, line := range strings.Split(string(content), "\n") {
+			line = strings.TrimSpace(line)
+			line = strings.TrimPrefix(line, "- ")
+			line = strings.TrimPrefix(line, "* ")
+			if line != "" && !strings.HasPrefix(line, "#") {
+				laws = append(laws, line)
+			}
+		}
+		if len(laws) > 0 {
+			guardrails.SetCustomConstitution(laws)
+			log.Printf("Loaded custom guardrails constitution (%d laws) from: %s", len(laws), constitutionPath)
+		}
+		enableGuardrails = true
+	}
+
 	if printVersion {
 		fmt.Printf("go-infer version %s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)
 		os.Exit(0)
@@ -118,6 +154,12 @@ func main() {
 
 	// Parse positional arguments if not passed via flags
 	args := flag.Args()
+	if cCoreMode {
+		if len(args) == 1 && promptText == "" && !strings.HasSuffix(args[0], ".gguf") && !strings.Contains(args[0], "/") && !strings.Contains(args[0], "\\") {
+			promptText = args[0]
+			args = nil
+		}
+	}
 	if modelPath == "" && len(args) > 0 {
 		modelPath = args[0]
 		args = args[1:]
@@ -125,6 +167,62 @@ func main() {
 
 	if promptText == "" && len(args) > 0 && serveAddr == "" {
 		promptText = strings.Join(args, " ")
+	}
+
+	// Hybrid C-Core Mode (Asimov Guarded C Inference Engine)
+	if cCoreMode {
+		if modelPath == "" {
+			modelPath = "./models/llama-3-8b-instruct.gguf"
+		}
+		log.Printf("Initializing Hybrid C-Core inference engine: %s", modelPath)
+		cModel, err := InitCModel(modelPath)
+		if err != nil {
+			log.Fatalf("Failed to initialize C inference engine weights: %v", err)
+		}
+		defer cModel.Close()
+
+		if serveAddr != "" {
+			srv := server.NewServer(nil, filepath.Base(modelPath), serveAddr)
+			srv.CORSOrigin = corsOrigin
+			srv.APIKey = apiKey
+			srv.EnableGuardrails = enableGuardrails
+			srv.CoreGenerator = func(prompt string) (string, error) {
+				return cModel.Generate(prompt)
+			}
+			if apiKey != "" {
+				fmt.Println("🔒 Bearer token API key authentication enabled")
+			}
+			if enableGuardrails {
+				fmt.Println("🛡️ Asimov Guardrails active on C-Core server")
+			}
+			fmt.Printf("🚀 Hybrid C+Go Inference Engine running on %s...\n", serveAddr)
+			if err := srv.Start(); err != nil {
+				log.Fatalf("Server error: %v", err)
+			}
+			return
+		}
+
+		if promptText != "" {
+			req := guardrails.GenerationRequest{Prompt: promptText}
+			resp := guardrails.ExecutePipeline(req, func(p string) (string, error) {
+				return cModel.Generate(p)
+			})
+			fmt.Printf("\n--- Asimov Guarded Prompt ---\n%s\n\n--- Response ---\n", promptText)
+			if resp.Blocked {
+				fmt.Printf("[GUARDRAIL BLOCKED: %s]\n", resp.BlockReason)
+				if resp.Output != "" {
+					fmt.Println(resp.Output)
+				}
+			} else {
+				fmt.Println(resp.Output)
+			}
+			fmt.Printf("\n[Latency: %d ms | Blocked: %v]\n", resp.LatencyMs, resp.Blocked)
+			return
+		}
+
+		// Interactive REPL with C-Core
+		runCCoreInteractiveREPL(cModel)
+		return
 	}
 
 	if modelPath == "" {
@@ -166,6 +264,14 @@ func main() {
 		modelName := filepath.Base(modelPath)
 		srv := server.NewServer(eng, modelName, serveAddr)
 		srv.CORSOrigin = corsOrigin
+		srv.APIKey = apiKey
+		srv.EnableGuardrails = enableGuardrails
+		if apiKey != "" {
+			fmt.Println("🔒 Bearer token API key authentication enabled")
+		}
+		if enableGuardrails {
+			fmt.Println("🛡️ Asimov Guardrails active on HTTP server (/v1/generate, /v1/chat/completions, /api/generate)")
+		}
 		if err := srv.Start(); err != nil {
 			log.Fatalf("Server error: %v", err)
 		}
@@ -233,6 +339,14 @@ func main() {
 
 	// Single Prompt Mode
 	if promptText != "" {
+		if enableGuardrails {
+			if err := guardrails.ValidateUserBoundary(guardrails.GenerationRequest{Prompt: promptText}); err != nil {
+				fmt.Printf("\n[GUARDRAIL BLOCKED: %v]\n", err)
+				return
+			}
+			formattedPrompt = guardrails.ConstructConstitutionalPrompt(promptText)
+		}
+
 		fmt.Printf("\n--- Prompt ---\n%s\n\n--- Response ---\n", promptText)
 		var fullResp strings.Builder
 		stats, err := eng.GenerateWithTools(formattedPrompt, maxTokens, params, enableCalc, func(token string) bool {
@@ -244,6 +358,14 @@ func main() {
 			log.Fatalf("Generation error: %v", err)
 		}
 		fmt.Println()
+
+		if enableGuardrails {
+			safeOut, blocked, reason := guardrails.CheckOutputGuardrails(fullResp.String())
+			if blocked {
+				fmt.Printf("\n[GUARDRAIL INTERVENTION: %s]\n%s\n", reason, safeOut)
+			}
+		}
+
 		fmt.Printf("\n[Prefill: %v | Generation: %v (%d tokens, %.2f tok/s)]\n",
 			stats.PrefillDuration, stats.GenerateDuration, stats.GeneratedTokens, stats.TokensPerSecond)
 		if reasoningMode {
@@ -256,13 +378,24 @@ func main() {
 	}
 
 	// Interactive REPL Mode
-	runInteractiveREPL(eng, maxTokens, params, enableCalc)
+	runInteractiveREPL(eng, maxTokens, params, enableCalc, enableGuardrails)
 }
 
-func runInteractiveREPL(eng *engine.Engine, maxTokens int, params sampler.Params, enableCalc bool) {
-	fmt.Println("\n=== Interactive Chat Mode (type 'exit' or Ctrl+C to quit) ===")
+func runInteractiveREPL(eng *engine.Engine, maxTokens int, params sampler.Params, enableCalc bool, enableGuardrails bool) {
+	if enableGuardrails {
+		fmt.Println("\n=== Interactive Chat Mode [🛡️ Asimov Guardrails Active] (type 'exit' or Ctrl+C to quit) ===")
+	} else {
+		fmt.Println("\n=== Interactive Chat Mode (type 'exit' or Ctrl+C to quit) ===")
+	}
 	scanner := bufio.NewScanner(os.Stdin)
 	var messages []engine.ChatMessage
+
+	if enableGuardrails {
+		messages = append(messages, engine.ChatMessage{
+			Role:    "system",
+			Content: guardrails.ConstructConstitutionalPrompt(""),
+		})
+	}
 
 	for {
 		fmt.Print("\nUser > ")
@@ -275,6 +408,13 @@ func runInteractiveREPL(eng *engine.Engine, maxTokens int, params sampler.Params
 		}
 		if input == "exit" || input == "quit" {
 			break
+		}
+
+		if enableGuardrails {
+			if err := guardrails.ValidateUserBoundary(guardrails.GenerationRequest{Prompt: input}); err != nil {
+				fmt.Printf("\n[GUARDRAIL BLOCKED: %v]\n", err)
+				continue
+			}
 		}
 
 		messages = append(messages, engine.ChatMessage{
@@ -296,11 +436,56 @@ func runInteractiveREPL(eng *engine.Engine, maxTokens int, params sampler.Params
 			continue
 		}
 		fmt.Println()
+
+		replyText := assistantResponse.String()
+		if enableGuardrails {
+			safeOut, blocked, reason := guardrails.CheckOutputGuardrails(replyText)
+			if blocked {
+				fmt.Printf("\n[GUARDRAIL INTERVENTION: %s]\n%s\n", reason, safeOut)
+				replyText = safeOut
+			}
+		}
+
 		fmt.Printf("[%.2f tok/s]\n", stats.TokensPerSecond)
 
 		messages = append(messages, engine.ChatMessage{
 			Role:    "assistant",
-			Content: assistantResponse.String(),
+			Content: replyText,
 		})
+	}
+}
+
+func runCCoreInteractiveREPL(cModel *CModelContext) {
+	fmt.Println("\n=== Hybrid C+Go Asimov Guarded Chat Mode (type 'exit' or Ctrl+C to quit) ===")
+	scanner := bufio.NewScanner(os.Stdin)
+
+	for {
+		fmt.Print("\nUser > ")
+		if !scanner.Scan() {
+			break
+		}
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			continue
+		}
+		if input == "exit" || input == "quit" {
+			break
+		}
+
+		req := guardrails.GenerationRequest{Prompt: input}
+		resp := guardrails.ExecutePipeline(req, func(prompt string) (string, error) {
+			return cModel.Generate(prompt)
+		})
+
+		fmt.Print("Assistant > ")
+		if resp.Blocked {
+			fmt.Printf("[GUARDRAIL BLOCKED: %s]\n", resp.BlockReason)
+			if resp.Output != "" {
+				fmt.Println(resp.Output)
+			}
+		} else {
+			fmt.Println(resp.Output)
+		}
+		fmt.Printf("[%d ms latency]\n", resp.LatencyMs)
 	}
 }

@@ -424,6 +424,13 @@ func (e *Engine) ForwardBatchAt(tokens []int, startPos int, kv *KVCache) []float
 	cfg := e.Config
 
 	if cfg.Architecture == "qwen35" {
+		if metal.IsAvailable() && e.PreallocatedQwen35Layers != nil && e.OutNormBuf != nil && e.OutWeightBuf != nil {
+			var logits []float32
+			for i, tok := range tokens {
+				logits = e.Forward(tok, startPos+i, kv)
+			}
+			return logits
+		}
 		return e.forwardBatchQwen35(tokens, startPos, kv, cfg)
 	}
 

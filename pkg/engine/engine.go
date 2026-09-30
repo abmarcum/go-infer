@@ -382,6 +382,7 @@ func (e *Engine) NewKVCache() *KVCache {
 	if e.Config.Architecture == "qwen35" {
 		ssmChannels := e.Config.SSMInnerSize + 2*e.Config.SSMGroupCount*e.Config.SSMStateSize
 		kv.InitSSM(e.Config.NumLayers, e.Config.SSMConvKernel, ssmChannels, e.Config.SSMInnerSize, e.Config.SSMStateSize)
+		metal.ResetSSMState()
 	}
 	return kv
 }
@@ -392,6 +393,7 @@ func (e *Engine) NewQuantizedKVCache(kvType KVCacheType) *KVCache {
 	if e.Config.Architecture == "qwen35" {
 		ssmChannels := e.Config.SSMInnerSize + 2*e.Config.SSMGroupCount*e.Config.SSMStateSize
 		kv.InitSSM(e.Config.NumLayers, e.Config.SSMConvKernel, ssmChannels, e.Config.SSMInnerSize, e.Config.SSMStateSize)
+		metal.ResetSSMState()
 	}
 	return kv
 }
@@ -443,13 +445,14 @@ func (e *Engine) GenerateWithTools(prompt string, maxTokens int, params sampler.
 	if params.ReasoningValidator != nil && len(params.Vocab) == 0 {
 		params.Vocab = e.Tokenizer.Vocab
 	}
+	e.populateStopTokens(&params)
 
 	// 1. Check Prefix / Prompt KV-Cache for instant reuse
 	var kv *KVCache
 	pos := 0
 	startPrefill := time.Now()
 
-	if e.PrefixCache != nil {
+	if e.PrefixCache != nil && e.Config.Architecture != "qwen35" {
 		matchedLen, cachedKV := e.PrefixCache.FindLongestPrefix(tokens)
 		if matchedLen > 0 && cachedKV != nil {
 			kv = cachedKV
@@ -459,6 +462,10 @@ func (e *Engine) GenerateWithTools(prompt string, maxTokens int, params sampler.
 
 	if kv == nil {
 		kv = e.NewKVCache()
+	}
+
+	if pos == 0 && e.Config.Architecture == "qwen35" {
+		metal.ResetSSMState()
 	}
 
 	// 2. Prefill remaining uncached prompt tokens
@@ -480,7 +487,7 @@ func (e *Engine) GenerateWithTools(prompt string, maxTokens int, params sampler.
 	prefillDur := time.Since(startPrefill)
 
 	// Cache the full prompt KV-cache state for future queries
-	if e.PrefixCache != nil {
+	if e.PrefixCache != nil && e.Config.Architecture != "qwen35" {
 		e.PrefixCache.Store(tokens, kv)
 	}
 
@@ -691,7 +698,7 @@ func (e *Engine) GenerateConsensusWithStream(prompt string, numSamples int, maxT
 	var baseKV *KVCache
 	pos := 0
 
-	if e.PrefixCache != nil {
+	if e.PrefixCache != nil && e.Config.Architecture != "qwen35" {
 		matchedLen, cachedKV := e.PrefixCache.FindLongestPrefix(tokens)
 		if matchedLen > 0 && cachedKV != nil {
 			baseKV = cachedKV
@@ -701,6 +708,10 @@ func (e *Engine) GenerateConsensusWithStream(prompt string, numSamples int, maxT
 
 	if baseKV == nil {
 		baseKV = e.NewKVCache()
+	}
+
+	if pos == 0 && e.Config.Architecture == "qwen35" {
+		metal.ResetSSMState()
 	}
 
 	var baseLogits []float32
@@ -724,7 +735,7 @@ func (e *Engine) GenerateConsensusWithStream(prompt string, numSamples int, maxT
 	savedBaseLogits := make([]float32, len(baseLogits))
 	copy(savedBaseLogits, baseLogits)
 
-	if e.PrefixCache != nil {
+	if e.PrefixCache != nil && e.Config.Architecture != "qwen35" {
 		e.PrefixCache.Store(tokens, baseKV)
 	}
 
@@ -732,6 +743,7 @@ func (e *Engine) GenerateConsensusWithStream(prompt string, numSamples int, maxT
 	startGen := time.Now()
 	totalGenTokens := 0
 	candidates := make([]reasoning.CandidateAnswer, numSamples)
+	e.populateStopTokens(&params)
 
 	for s := 0; s < numSamples; s++ {
 		sampleKV := baseKV.Clone()
@@ -830,6 +842,20 @@ func (e *Engine) isStopToken(tok int) bool {
 		}
 	}
 	return false
+}
+
+func (e *Engine) populateStopTokens(params *sampler.Params) {
+	if len(params.StopTokens) == 0 {
+		stopTokens := []int{e.Config.EosID, e.Config.EotID}
+		if e.Tokenizer != nil {
+			for _, name := range []string{"<|im_end|>", "<|endoftext|>", "<|eot_id|>", "<｜end▁of▁sentence｜>", "<｜User｜>", "<｜Assistant｜>", "<｜begin▁of▁sentence｜>"} {
+				if id, ok := e.Tokenizer.TokenToID[name]; ok {
+					stopTokens = append(stopTokens, id)
+				}
+			}
+		}
+		params.StopTokens = stopTokens
+	}
 }
 
 // FormatChat formats messages according to standard LLaMA 3, DeepSeek, or ChatML prompt templates.

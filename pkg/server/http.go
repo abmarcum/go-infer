@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"go-inference/pkg/engine"
 	"go-inference/pkg/guardrails"
+	"go-inference/pkg/metal"
 	"go-inference/pkg/reasoning"
 	"go-inference/pkg/sampler"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +38,20 @@ type Server struct {
 	EnableGuardrails bool
 	CoreGenerator    func(prompt string) (string, error)
 
+	// Distributed inference topology
+	DistMode       string
+	DraftServer    string
+	DraftTokens    int
+	PipelineLayers string
+	PipelineNext   string
+	TPRank         int
+	TPPeers        string
+
+	// Runtime UI Personas & Guardrails Configuration
+	Personas       []Persona
+	PersonasPath   string
+	GuardrailsPath string
+
 	// Telemetry & Metrics Counters
 	RequestsTotal    uint64
 	TokensTotal      uint64
@@ -52,6 +69,8 @@ func NewServer(eng *engine.Engine, modelName, port string) *Server {
 		ModelName:  modelName,
 		Port:       port,
 		CORSOrigin: "", // secure default: no open wildcard unless explicitly set
+		DistMode:   "standalone",
+		Personas:   DefaultPersonas(),
 		sem:        make(chan struct{}, 32),
 	}
 }
@@ -96,8 +115,10 @@ type OpenAIChatRequest struct {
 	Tools           []Tool               `json:"tools,omitempty"`
 	ToolChoice      interface{}          `json:"tool_choice,omitempty"`
 	N               int                  `json:"n,omitempty"`
-	BestOfN         int                  `json:"best_of_n,omitempty"`
-	ReasoningEffort string               `json:"reasoning_effort,omitempty"`
+	BestOfN           int                  `json:"best_of_n,omitempty"`
+	ReasoningEffort   string               `json:"reasoning_effort,omitempty"`
+	RepetitionPenalty float32              `json:"repetition_penalty,omitempty"`
+	EnableGuardrails  *bool                `json:"enable_guardrails,omitempty"`
 }
 
 type OpenAIStreamChunk struct {
@@ -183,8 +204,8 @@ type OllamaGenerateChunk struct {
 	Done      bool   `json:"done"`
 }
 
-// Start launches the HTTP API server with secure timeouts and telemetry.
-func (s *Server) Start() error {
+// Handler returns the configured http.Handler with all API and UI endpoints registered.
+func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Web UI & Metrics
@@ -202,15 +223,21 @@ func (s *Server) Start() error {
 	// Ollama Endpoints
 	mux.HandleFunc("/api/generate", s.handleOllamaGenerate)
 	mux.HandleFunc("/api/tags", s.handleOllamaTags)
+	mux.HandleFunc("/api/personas", s.handlePersonas)
 
 	// Distributed inference endpoints
 	mux.HandleFunc("/v1/dist/pipeline-forward", s.handlePipelineForward)
 	mux.HandleFunc("/v1/dist/speculative-draft", s.handleSpeculativeDraft)
 	mux.HandleFunc("/v1/dist/tp-reduce", s.handleTPReduce)
 
+	return mux
+}
+
+// Start launches the HTTP API server with secure timeouts and telemetry.
+func (s *Server) Start() error {
 	srv := &http.Server{
 		Addr:              s.Port,
-		Handler:           mux,
+		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -559,17 +586,117 @@ func (s *Server) handleTPReduce(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) isStandalone() bool {
+	mode := strings.ToLower(s.DistMode)
+	if mode == "" || mode == "none" || mode == "standalone" {
+		return s.DraftServer == "" && s.PipelineNext == "" && s.TPPeers == ""
+	}
+	return false
+}
+
+func (s *Server) clusterRole() string {
+	mode := strings.ToLower(s.DistMode)
+	if mode == "speculative" || s.DraftServer != "" {
+		return "Speculative Decoding Verifier"
+	}
+	if mode == "pipeline" || s.PipelineNext != "" || s.PipelineLayers != "" {
+		if s.PipelineLayers != "" {
+			return fmt.Sprintf("Pipeline Stage (%s)", s.PipelineLayers)
+		}
+		return "Pipeline Parallel Worker"
+	}
+	if mode == "tensor-parallel" || s.TPPeers != "" {
+		return fmt.Sprintf("Tensor Parallel Worker (Rank %d)", s.TPRank)
+	}
+	return "Standalone Single Node"
+}
+
+func (s *Server) clusterPeers() []string {
+	var peers []string
+	if s.DraftServer != "" {
+		peers = append(peers, s.DraftServer)
+	}
+	if s.PipelineNext != "" {
+		peers = append(peers, s.PipelineNext)
+	}
+	if s.TPPeers != "" {
+		for _, p := range strings.Split(s.TPPeers, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				peers = append(peers, p)
+			}
+		}
+	}
+	return peers
+}
+
+func (s *Server) handlePersonas(w http.ResponseWriter, r *http.Request) {
+	s.setCORS(w)
+	w.Header().Set("Content-Type", "application/json")
+	personas := s.Personas
+	if len(personas) == 0 {
+		personas = DefaultPersonas()
+	}
+	json.NewEncoder(w).Encode(personas)
+}
+
+func (s *Server) backendName() string {
+	if s.CoreGenerator != nil && s.Engine == nil {
+		return "C Core Hybrid"
+	}
+	if metal.IsAvailable() {
+		return "Apple Metal GPU"
+	}
+	return "Pure Go (CPU)"
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.setCORS(w)
 	w.Header().Set("Content-Type", "application/json")
+
+	peers := s.clusterPeers()
+	isStandalone := s.isStandalone()
+	mode := "standalone"
+	if !isStandalone {
+		mode = "cluster"
+	}
+
+	personas := s.Personas
+	if len(personas) == 0 {
+		personas = DefaultPersonas()
+	}
+
+	backend := s.backendName()
+
 	resp := map[string]interface{}{
-		"status": "healthy",
-		"model":  s.ModelName,
+		"status":                "healthy",
+		"model":                 s.ModelName,
+		"backend":               backend,
+		"guardrails":            s.EnableGuardrails,
+		"guardrails_rules_path": guardrails.GetActiveRulesPath(),
+		"constitution":          guardrails.GetActiveConstitution(),
+		"personas":              personas,
+		"cluster": map[string]interface{}{
+			"mode":            mode,
+			"is_standalone":   isStandalone,
+			"dist_mode":       s.DistMode,
+			"role":            s.clusterRole(),
+			"backend":         backend,
+			"peers":           peers,
+			"connected_count": len(peers),
+			"draft_server":    s.DraftServer,
+			"pipeline_layers": s.PipelineLayers,
+			"pipeline_next":   s.PipelineNext,
+			"tp_rank":         s.TPRank,
+			"tp_peers":        s.TPPeers,
+		},
 	}
 	if s.Engine != nil {
 		resp["layers"] = s.Engine.Config.NumLayers
 		resp["dim"] = s.Engine.Config.Dim
 		resp["vocab"] = s.Engine.Config.VocabSize
+		resp["seq_len"] = s.Engine.Config.SeqLen
+		resp["arch"] = s.Engine.Config.Architecture
 	}
 	json.NewEncoder(w).Encode(resp)
 }
@@ -583,15 +710,41 @@ func (s *Server) handleOllamaTags(w http.ResponseWriter, r *http.Request) {
 	if s.Engine != nil && s.Engine.Reader != nil {
 		size = len(s.Engine.Reader.Data)
 	}
+
+	modelList := []map[string]interface{}{
+		{
+			"name":        s.ModelName,
+			"modified_at": time.Now().Format(time.RFC3339),
+			"size":        size,
+			"active":      true,
+		},
+	}
+
+	// Scan 'models' directory for additional available GGUF models
+	if entries, err := os.ReadDir("models"); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
+				name := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+				if name != s.ModelName {
+					info, _ := e.Info()
+					sz := int64(0)
+					if info != nil {
+						sz = info.Size()
+					}
+					modelList = append(modelList, map[string]interface{}{
+						"name":        name,
+						"modified_at": time.Now().Format(time.RFC3339),
+						"size":        sz,
+						"active":      false,
+					})
+				}
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"models": []map[string]interface{}{
-			{
-				"name":        s.ModelName,
-				"modified_at": time.Now().Format(time.RFC3339),
-				"size":        size,
-			},
-		},
+		"models": modelList,
 	})
 }
 
@@ -626,8 +779,13 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	enforceGuardrails := s.EnableGuardrails
+	if req.EnableGuardrails != nil {
+		enforceGuardrails = *req.EnableGuardrails
+	}
+
 	messages := req.Messages
-	if s.EnableGuardrails {
+	if enforceGuardrails {
 		for i := len(req.Messages) - 1; i >= 0; i-- {
 			if req.Messages[i].Role == "user" {
 				if err := guardrails.ValidateUserBoundary(guardrails.GenerationRequest{Prompt: req.Messages[i].Content}); err != nil {
@@ -690,13 +848,54 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			if s.EnableGuardrails {
+			if enforceGuardrails {
 				safeOut, blocked, reason := guardrails.CheckOutputGuardrails(output)
 				if blocked {
 					log.Printf("Guardrail intervention on chat completion: %s", reason)
 					output = safeOut
 				}
 			}
+
+			if req.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+					return
+				}
+				reqID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+				words := strings.Fields(output)
+				for i, word := range words {
+					chunkText := word
+					if i < len(words)-1 {
+						chunkText += " "
+					}
+					chunk := OpenAIStreamChunk{
+						ID:      reqID,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   s.ModelName,
+						Choices: []OpenAIChoiceChunk{
+							{
+								Index: 0,
+								Delta: OpenAIDelta{
+									Content: chunkText,
+								},
+							},
+						},
+					}
+					b, _ := json.Marshal(chunk)
+					fmt.Fprintf(w, "data: %s\n\n", b)
+					flusher.Flush()
+					time.Sleep(15 * time.Millisecond)
+				}
+				fmt.Fprintf(w, "data: [DONE]\n\n")
+				flusher.Flush()
+				return
+			}
+
 			resp := OpenAIChatResponse{
 				ID:      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
 				Object:  "chat.completion",
@@ -728,11 +927,20 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 
 	// Auto-tune hyperparameters for reasoning models
 	isReasoning := req.ReasoningEffort != "" || strings.Contains(strings.ToLower(req.Model), "r1") || strings.Contains(strings.ToLower(req.Model), "reasoning")
+	
+	repPenalty := float32(1.0)
+	if req.RepetitionPenalty > 0 {
+		repPenalty = req.RepetitionPenalty
+	} else if isReasoning {
+		repPenalty = 1.0 // Strictly disabled for reasoning models
+	}
+
 	params := sampler.Params{
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
 		TopK:        40,
-		RepPenalty:  1.1,
+		RepPenalty:  repPenalty,
+		RepWindow:   64,
 	}
 	if isReasoning {
 		params = reasoning.ReasoningParams()
@@ -741,6 +949,9 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 		}
 		if req.TopP > 0 {
 			params.TopP = req.TopP
+		}
+		if req.RepetitionPenalty > 0 {
+			params.RepPenalty = req.RepetitionPenalty
 		}
 	} else {
 		if params.Temperature <= 0 {
@@ -823,7 +1034,7 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 		reqID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 		inThinking := false
 		var sg *guardrails.StreamingGuardrail
-		if s.EnableGuardrails {
+		if enforceGuardrails {
 			sg = guardrails.NewStreamingGuardrail()
 		}
 
@@ -920,7 +1131,7 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 		replyText = ans
 	}
 
-	if s.EnableGuardrails {
+	if enforceGuardrails {
 		safeText, blocked, reason := guardrails.CheckOutputGuardrails(replyText)
 		if blocked {
 			log.Printf("Guardrail intervention on chat completion: %s", reason)

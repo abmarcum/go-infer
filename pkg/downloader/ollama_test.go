@@ -27,6 +27,7 @@ func TestResolveModelPathOllamaManifest(t *testing.T) {
 	tmpDir := t.TempDir()
 	homeDir := filepath.Join(tmpDir, "home")
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
 
 	modelsDir := filepath.Join(homeDir, ".ollama", "models")
 	manifestDir := filepath.Join(modelsDir, "manifests", "registry.ollama.ai", "library", "qwen3.6")

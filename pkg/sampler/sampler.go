@@ -13,6 +13,8 @@ type Params struct {
 	TopP               float32
 	TopK               int
 	RepPenalty         float32
+	RepWindow          int   // Sliding window for repetition penalty (default 64)
+	StopTokens         []int // Tokens exempt from repetition penalty (e.g. EOS, EOT)
 	Rand               *rand.Rand
 	JSONValidator      *GrammarValidator
 	ReasoningValidator *ReasoningGrammarValidator
@@ -26,6 +28,7 @@ func DefaultParams() Params {
 		TopP:        0.9,
 		TopK:        40,
 		RepPenalty:  1.1,
+		RepWindow:   64,
 		Rand:        rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
@@ -46,10 +49,29 @@ func SampleToken(logits []float32, history []int, params Params) int {
 		ApplyReasoningGrammarMask(logits, params.Vocab, params.ReasoningValidator)
 	}
 
-
-	// 1. Repetition Penalty
+	// 1. Repetition Penalty (applied once per unique token within sliding window)
 	if params.RepPenalty != 1.0 && params.RepPenalty > 0 && len(history) > 0 {
-		for _, tok := range history {
+		window := history
+		windowSize := params.RepWindow
+		if windowSize <= 0 {
+			windowSize = 64
+		}
+		if len(window) > windowSize {
+			window = window[len(window)-windowSize:]
+		}
+
+		stopSet := make(map[int]bool, len(params.StopTokens))
+		for _, st := range params.StopTokens {
+			stopSet[st] = true
+		}
+
+		seen := make(map[int]bool, len(window))
+		for _, tok := range window {
+			if seen[tok] || stopSet[tok] {
+				continue
+			}
+			seen[tok] = true
+
 			if tok >= 0 && tok < len(logits) {
 				if logits[tok] < 0 {
 					logits[tok] *= params.RepPenalty

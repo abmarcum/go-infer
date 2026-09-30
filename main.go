@@ -47,12 +47,14 @@ func main() {
 		tpRank         int
 		tpPeers        string
 		bestOfN        int
-		reasoningMode    bool
-		enableCalc       bool
-		enableGuardrails bool
-		cCoreMode        bool
-		apiKey           string
-		constitutionPath string
+		reasoningMode       bool
+		enableCalc          bool
+		enableGuardrails    bool
+		cCoreMode           bool
+		apiKey              string
+		constitutionPath    string
+		guardrailsRulesPath string
+		personasPath        string
 	)
 
 	flag.BoolVar(&printVersion, "version", false, "Print version information and exit")
@@ -62,7 +64,9 @@ func main() {
 	flag.StringVar(&serveAddr, "serve", "", "Start HTTP OpenAI & Ollama compatible server on address (e.g. :8080)")
 	flag.StringVar(&corsOrigin, "cors-origin", "*", "Allowed CORS origin header for HTTP API")
 	flag.StringVar(&apiKey, "api-key", "", "API key required for authenticating requests via Bearer token (or set GO_INFER_API_KEY)")
-	flag.StringVar(&constitutionPath, "constitution", "", "Path to custom constitution file for guardrails")
+	flag.StringVar(&guardrailsRulesPath, "guardrails-rules", "", "Path to custom guardrails rules text file (e.g. configs/guardrails.txt)")
+	flag.StringVar(&constitutionPath, "constitution", "", "Path to custom constitution file for guardrails (alias for --guardrails-rules)")
+	flag.StringVar(&personasPath, "personas", "", "Path to runtime UI personas configuration file (JSON or formatted text, e.g. configs/personas.json)")
 	flag.IntVar(&numThreads, "threads", runtime.NumCPU(), "Number of CPU worker threads for GEMV")
 	flag.IntVar(&maxTokens, "max-tokens", 256, "Maximum tokens to generate")
 	flag.Float64Var(&temperature, "temp", 0.7, "Sampling temperature (0.0 for greedy)")
@@ -113,7 +117,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  Local Prompt:   go-infer [flags] <path-to-gguf> \"<prompt>\"\n")
 		fmt.Fprintf(os.Stderr, "  Interactive:    go-infer [flags] <path-to-gguf>\n")
 		fmt.Fprintf(os.Stderr, "  HTTP Server:    go-infer --serve :8080 <path-to-gguf>\n")
-		fmt.Fprintf(os.Stderr, "  Asimov Guard:   go-infer --guardrails <path-to-gguf> \"<prompt>\"\n")
+		fmt.Fprintf(os.Stderr, "  Guardrails:     go-infer --guardrails --guardrails-rules configs/guardrails.txt <path-to-gguf> \"<prompt>\"\n")
+		fmt.Fprintf(os.Stderr, "  UI Personas:    go-infer --serve :8080 --personas configs/personas.json <path-to-gguf>\n")
 		fmt.Fprintf(os.Stderr, "  Hybrid C Core:  go-infer --c-core --serve :8080\n")
 		fmt.Fprintf(os.Stderr, "  Speculative:    go-infer --dist-mode speculative --draft-server http://draft:8080 <path-to-gguf> \"<prompt>\"\n")
 		fmt.Fprintf(os.Stderr, "  Pipeline Stage: go-infer --serve :8080 --pipeline-layers 0-19 --pipeline-next http://stage2:8080 <path-to-gguf>\n\n")
@@ -126,25 +131,46 @@ func main() {
 	if apiKey == "" {
 		apiKey = os.Getenv("GO_INFER_API_KEY")
 	}
-	if constitutionPath != "" {
-		content, err := os.ReadFile(constitutionPath)
+
+	// 1. Runtime Guardrails Rules file loading
+	rulesPath := guardrailsRulesPath
+	if rulesPath == "" {
+		rulesPath = constitutionPath
+	}
+	if rulesPath == "" {
+		if _, err := os.Stat("configs/guardrails.txt"); err == nil {
+			rulesPath = "configs/guardrails.txt"
+		}
+	}
+	if rulesPath != "" {
+		laws, err := guardrails.LoadConstitutionFromFile(rulesPath)
 		if err != nil {
-			log.Fatalf("Failed to read constitution file from %s: %v", constitutionPath, err)
+			log.Fatalf("Failed to load guardrails rules from %s: %v", rulesPath, err)
 		}
-		var laws []string
-		for _, line := range strings.Split(string(content), "\n") {
-			line = strings.TrimSpace(line)
-			line = strings.TrimPrefix(line, "- ")
-			line = strings.TrimPrefix(line, "* ")
-			if line != "" && !strings.HasPrefix(line, "#") {
-				laws = append(laws, line)
-			}
+		log.Printf("Loaded runtime guardrails rules (%d rules) from: %s", len(laws), rulesPath)
+		if guardrailsRulesPath != "" || constitutionPath != "" {
+			enableGuardrails = true
 		}
-		if len(laws) > 0 {
-			guardrails.SetCustomConstitution(laws)
-			log.Printf("Loaded custom guardrails constitution (%d laws) from: %s", len(laws), constitutionPath)
+	}
+
+	// 2. Runtime UI Personas file loading
+	var loadedPersonas []server.Persona
+	pPath := personasPath
+	if pPath == "" {
+		if _, err := os.Stat("configs/personas.json"); err == nil {
+			pPath = "configs/personas.json"
+		} else if _, err := os.Stat("configs/personas.txt"); err == nil {
+			pPath = "configs/personas.txt"
 		}
-		enableGuardrails = true
+	}
+	if pPath != "" {
+		pList, err := server.LoadPersonasFromFile(pPath)
+		if err != nil {
+			log.Printf("Warning: failed to load personas from %s: %v", pPath, err)
+		} else {
+			loadedPersonas = pList
+			log.Printf("Loaded runtime UI personas (%d personas) from: %s", len(loadedPersonas), pPath)
+		}
 	}
 
 	if printVersion {
@@ -186,6 +212,20 @@ func main() {
 			srv.CORSOrigin = corsOrigin
 			srv.APIKey = apiKey
 			srv.EnableGuardrails = enableGuardrails
+			srv.DistMode = distMode
+			srv.DraftServer = draftServer
+			srv.DraftTokens = draftTokens
+			srv.PipelineLayers = pipelineLayers
+			srv.PipelineNext = pipelineNext
+			srv.TPRank = tpRank
+			srv.TPPeers = tpPeers
+			if len(loadedPersonas) > 0 {
+				srv.Personas = loadedPersonas
+				srv.PersonasPath = pPath
+			}
+			if rulesPath != "" {
+				srv.GuardrailsPath = rulesPath
+			}
 			srv.CoreGenerator = func(prompt string) (string, error) {
 				return cModel.Generate(prompt)
 			}
@@ -266,6 +306,20 @@ func main() {
 		srv.CORSOrigin = corsOrigin
 		srv.APIKey = apiKey
 		srv.EnableGuardrails = enableGuardrails
+		srv.DistMode = distMode
+		srv.DraftServer = draftServer
+		srv.DraftTokens = draftTokens
+		srv.PipelineLayers = pipelineLayers
+		srv.PipelineNext = pipelineNext
+		srv.TPRank = tpRank
+		srv.TPPeers = tpPeers
+		if len(loadedPersonas) > 0 {
+			srv.Personas = loadedPersonas
+			srv.PersonasPath = pPath
+		}
+		if rulesPath != "" {
+			srv.GuardrailsPath = rulesPath
+		}
 		if apiKey != "" {
 			fmt.Println("🔒 Bearer token API key authentication enabled")
 		}

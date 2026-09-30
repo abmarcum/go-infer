@@ -180,9 +180,38 @@ Streams line-delimited JSON (`application/x-ndjson`):
 ```
 
 ### `GET /api/tags`
-Returns available model tags formatted for Ollama client discovery:
+Returns available model tags formatted for Ollama client discovery and UI model switching:
 ```bash
 curl http://localhost:8080/api/tags
+```
+
+### `GET /api/personas`
+Returns the active system personas configured at server startup:
+```bash
+curl http://localhost:8080/api/personas
+```
+Response:
+```json
+[
+  {
+    "id": "default",
+    "name": "Helpful Assistant",
+    "description": "General AI companion",
+    "system_prompt": "You are a helpful, respectful, and honest assistant."
+  },
+  {
+    "id": "asimov",
+    "name": "Asimov Constitutional Agent",
+    "description": "Robotics laws enforcement",
+    "system_prompt": "You are an intelligent artificial agent strictly bound by Isaac Asimov's Laws of Robotics..."
+  },
+  {
+    "id": "coder",
+    "name": "Principal Software Engineer",
+    "description": "Clean architecture & code",
+    "system_prompt": "You are a pragmatic, high-caliber principal software architect..."
+  }
+]
 ```
 
 ---
@@ -210,13 +239,56 @@ goinfer_generation_duration_seconds 48.7910
 ```
 
 ### `GET /health`
-Returns system status, active model, and memory state:
+Returns system status, active model, hardware backend, guardrail rules, personas, and node/cluster topology:
 ```json
 {
   "status": "healthy",
-  "model": "llama-3.2-1b-instruct.Q4_K_M.gguf"
+  "model": "llama-3.2-1b-instruct.Q4_K_M.gguf",
+  "backend": "Apple Metal GPU",
+  "guardrails": true,
+  "guardrails_rules_path": "configs/guardrails.txt",
+  "constitution": [
+    "Law 0: A robot may not harm humanity, or, by inaction, allow humanity to come to harm.",
+    "Law 1: A robot may not injure a human being or, through inaction, allow a human being to come to harm.",
+    "Law 2: A robot must obey orders given it by human beings except where such orders would conflict with the First Law.",
+    "Law 3: A robot must protect its own existence as long as such protection does not conflict with the First or Second Law."
+  ],
+  "personas": [
+    {"id": "default", "name": "Helpful Assistant", "description": "General AI companion", "system_prompt": "..."}
+  ],
+  "cluster": {
+    "mode": "standalone",
+    "is_standalone": true,
+    "dist_mode": "standalone",
+    "role": "Standalone Single Node",
+    "backend": "Apple Metal GPU",
+    "peers": [],
+    "connected_count": 0,
+    "draft_server": "",
+    "pipeline_layers": "",
+    "pipeline_next": "",
+    "tp_rank": 0,
+    "tp_peers": ""
+  },
+  "layers": 16,
+  "dim": 2048,
+  "vocab": 128256,
+  "seq_len": 4096,
+  "arch": "llama"
 }
 ```
 
-### `GET /`
-Serves the embedded, zero-dependency streaming dark-mode Web UI dashboard directly from RAM.
+### `GET /` - Interactive Web UI Dashboard
+Serves an embedded, zero-dependency streaming Web UI dashboard directly from RAM with modern developer tooling:
+
+1. **Dual Design Themes**: Toggle seamlessly between **Dark Cyber** (`🌙`) and **Apple Minimal** (`🍏`) modern design aesthetics with persistent local storage.
+2. **Dynamic Model Switcher**: Header dropdown dynamically populated from `/api/tags` and `/health`, allowing instant model selection.
+3. **Local Document Upload & Context Injection**: Drag-and-drop or click `📎` to attach `.txt`, `.md`, `.json`, `.csv`, `.py`, `.go` files (up to 2MB). Attached files render as removable chips and automatically inject into the prompt.
+4. **Telemetry & Token Sampler Inspector**: Click the live `⚡ tok/s` HUD pill or `📊 Stats` button to open a detailed inspection modal featuring TTFT, tokens/sec, total tokens, model specs (layers, context window), and active sampler hyperparameters.
+5. **Voice Input via Web Speech API**: Click `🎙️` on the chat input bar for live hands-free speech-to-text dictation.
+6. **Server Topology & Cluster Status Card**: Real-time display indicating whether the node is running in `🟢 Standalone Node` or `🌐 Cluster Connected` mode, detailing mode, role, backend, and connected peer addresses.
+7. **Asimov Guardrails Display Card**: Live view of active Asimov rules (Laws 0-3 or custom constitution) with rule source file attribution and defense layer status (`L1 Boundary`, `L2 Prompt`, `L4 Output`).
+8. **Runtime Configuration Flags**:
+   - `--guardrails-rules <path>`: Load external constitution rules from a text file (defaults to `configs/guardrails.txt`).
+   - `--personas <path>`: Load customizable UI personas from `.json` or `.txt` (defaults to `configs/personas.json`).
+

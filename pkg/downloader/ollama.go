@@ -26,6 +26,9 @@ func ResolveModelPath(modelPathOrTag string) (string, error) {
 
 	// 2. Check candidate Ollama model roots
 	var candidateRoots []string
+	if envModels := os.Getenv("OLLAMA_MODELS"); envModels != "" {
+		candidateRoots = append(candidateRoots, envModels)
+	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		candidateRoots = append(candidateRoots, filepath.Join(home, ".ollama", "models"))
 	}

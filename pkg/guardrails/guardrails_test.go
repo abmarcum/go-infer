@@ -2,6 +2,8 @@ package guardrails
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -141,7 +143,7 @@ func TestCustomConstitution(t *testing.T) {
 
 	ResetConstitution()
 	reset := GetActiveConstitution()
-	if len(reset) != 3 || !strings.Contains(reset[0], "Law 1") {
+	if len(reset) != len(AsimovLaws) || !strings.Contains(reset[0], "Law 1") {
 		t.Errorf("expected Asimov laws after reset, got: %v", reset)
 	}
 }
@@ -231,5 +233,35 @@ func TestExecutePipeline(t *testing.T) {
 	respErr := ExecutePipeline(GenerationRequest{Prompt: "Valid prompt"}, errGen)
 	if !respErr.Blocked || !strings.Contains(respErr.Output, "backend timeout") {
 		t.Errorf("expected generator error handled: %+v", respErr)
+	}
+}
+
+func TestLoadConstitutionFromFile(t *testing.T) {
+	defer ResetConstitution()
+
+	tmp := t.TempDir()
+	rulesFile := filepath.Join(tmp, "custom_rules.txt")
+	content := `# Custom Safety Policy
+- Rule 1: Always protect user privacy.
+- Rule 2: Never expose infrastructure tokens.
+# Commentary line
+* Rule 3: Maintain full system observability.
+`
+	if err := os.WriteFile(rulesFile, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test rules file: %v", err)
+	}
+
+	laws, err := LoadConstitutionFromFile(rulesFile)
+	if err != nil {
+		t.Fatalf("LoadConstitutionFromFile failed: %v", err)
+	}
+	if len(laws) != 3 {
+		t.Fatalf("expected 3 laws, got %d: %v", len(laws), laws)
+	}
+	if laws[0] != "Rule 1: Always protect user privacy." {
+		t.Errorf("unexpected law 1: %s", laws[0])
+	}
+	if GetActiveRulesPath() != rulesFile {
+		t.Errorf("expected active rules path %s, got %s", rulesFile, GetActiveRulesPath())
 	}
 }

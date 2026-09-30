@@ -139,6 +139,9 @@ jobs:
 
           cp build_stage/* "${PKG_NAME}/"
           cp README.md "${PKG_NAME}/"
+          if [ -d "configs" ]; then
+            cp -r configs "${PKG_NAME}/"
+          fi
           if [ -f "packaging/default/goinfer.conf" ]; then
             cp packaging/default/goinfer.conf "${PKG_NAME}/"
           fi

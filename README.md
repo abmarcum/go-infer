@@ -4,7 +4,7 @@
 
 # go-infer
 
-**High-Performance LLM Inference Runtime in Go & C with Asimov Runtime Guardrails, Apple Metal GPU Acceleration, and Distributed Clustering**
+**Written with Google Gemini, a High-Performance LLM Inference Runtime in Go & C with Asimov Runtime Guardrails, Apple Metal GPU Acceleration, and Distributed Clustering**
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)

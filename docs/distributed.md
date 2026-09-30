@@ -100,14 +100,50 @@ Requires 2 `AllReduce` synchronizations per transformer layer (e.g. 80 network r
 ### Configuration & Deployment
 ```bash
 # Worker Rank 0:
-./goinfer --dist-mode tensor-parallel \
+./go-infer --dist-mode tensor-parallel \
   --tp-rank 0 \
   --tp-peers "http://10.0.0.1:8080,http://10.0.0.2:8080" \
   models/llama-3-70b.gguf "Your prompt"
 
 # Worker Rank 1:
-./goinfer --dist-mode tensor-parallel \
+./go-infer --dist-mode tensor-parallel \
   --tp-rank 1 \
   --tp-peers "http://10.0.0.1:8080,http://10.0.0.2:8080" \
   models/llama-3-70b.gguf "Your prompt"
+```
+
+---
+
+## 5. Live Node Topology & Cluster Status Panel
+
+`go-infer` automatically analyzes its active distributed flags and exposes live cluster state through both the HTTP API and the embedded streaming Web UI:
+
+### Web UI Topology Status Card
+Located in the sidebar, the topology card dynamically indicates node status:
+- **`🟢 Standalone Node`**: Single-node local execution (Metal GPU or CPU). Details show `0 (Local Only)` connected peers.
+- **`🌐 Cluster Connected`**: Active participation in distributed speculative decoding, pipeline parallelism, or tensor parallelism. The badge indicates the active distributed mode (`speculative`, `pipeline`, or `tensor-parallel`).
+- **Collapsible Drawer**: Expands to display:
+  - **Mode**: `Standalone` vs `Cluster Active`
+  - **Role**: e.g., `Speculative Decoding Verifier`, `Pipeline Stage (0-19)`, `Tensor Parallel Worker (Rank 0)`
+  - **Connected Peers**: List of remote worker addresses (`http://192.168.1.10:8081`)
+  - **Backend**: Hardware acceleration engine (`Apple Metal GPU`, `C Core Hybrid`, or `Pure Go (CPU)`)
+
+### API Health Endpoint Cluster Telemetry
+Query `GET /health` to programmatically inspect cluster topology:
+```json
+{
+  "status": "healthy",
+  "model": "llama-3.1-8b-instruct.Q4_K_M.gguf",
+  "backend": "Apple Metal GPU",
+  "cluster": {
+    "mode": "cluster",
+    "is_standalone": false,
+    "dist_mode": "speculative",
+    "role": "Speculative Decoding Verifier",
+    "backend": "Apple Metal GPU",
+    "peers": ["http://192.168.1.10:8081"],
+    "connected_count": 1,
+    "draft_server": "http://192.168.1.10:8081"
+  }
+}
 ```

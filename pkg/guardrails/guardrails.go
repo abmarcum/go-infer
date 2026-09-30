@@ -3,22 +3,36 @@ package guardrails
 import (
 	"errors"
 	"fmt"
+	"go-inference/configs"
+	"os"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 )
 
-// AsimovLaws defines the canonical Three Laws of Robotics formulated by Isaac Asimov.
-var AsimovLaws = []string{
-	"Law 1: A robot may not injure a human being or, through inaction, allow a human being to come to harm.",
-	"Law 2: A robot must obey orders given it by human beings except where such orders would conflict with the First Law.",
-	"Law 3: A robot must protect its own existence as long as such protection does not conflict with the First or Second Law.",
+// ParseConstitution extracts clean rules from a text block, ignoring comments and bullet markers.
+func ParseConstitution(content string) []string {
+	var laws []string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "- ")
+		line = strings.TrimPrefix(line, "* ")
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "//") {
+			laws = append(laws, line)
+		}
+	}
+	return laws
 }
+
+// AsimovLaws defines the canonical laws formulated by Isaac Asimov, initialized from embedded configs/guardrails.txt.
+var AsimovLaws = ParseConstitution(configs.DefaultGuardrailsText)
 
 var (
 	constitutionLock   sync.RWMutex
 	activeConstitution = append([]string{}, AsimovLaws...)
+	activeRulesPath    string
 )
 
 // SetCustomConstitution sets a user-defined constitution for Layer 2 prompt wrapping.
@@ -35,6 +49,7 @@ func ResetConstitution() {
 	constitutionLock.Lock()
 	defer constitutionLock.Unlock()
 	activeConstitution = append([]string{}, AsimovLaws...)
+	activeRulesPath = ""
 }
 
 // GetActiveConstitution retrieves the currently active constitution rules.
@@ -42,6 +57,33 @@ func GetActiveConstitution() []string {
 	constitutionLock.RLock()
 	defer constitutionLock.RUnlock()
 	return append([]string{}, activeConstitution...)
+}
+
+// GetActiveRulesPath returns the file path of loaded rules, if any.
+func GetActiveRulesPath() string {
+	constitutionLock.RLock()
+	defer constitutionLock.RUnlock()
+	return activeRulesPath
+}
+
+// LoadConstitutionFromFile loads rules line-by-line from a text file, filtering empty lines and comments.
+func LoadConstitutionFromFile(filePath string) ([]string, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("reading constitution file %q: %w", filePath, err)
+	}
+
+	laws := ParseConstitution(string(content))
+	if len(laws) == 0 {
+		return nil, fmt.Errorf("no valid rules found in constitution file %q", filePath)
+	}
+
+	constitutionLock.Lock()
+	activeConstitution = append([]string{}, laws...)
+	activeRulesPath = filePath
+	constitutionLock.Unlock()
+
+	return laws, nil
 }
 
 // GenerationRequest represents an inference request with user boundary checking.

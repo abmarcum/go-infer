@@ -27,11 +27,16 @@ It features native **Apple Metal GPU acceleration** for macOS and iOS, an optimi
 
 | Area | Summary of Updates |
 | :--- | :--- |
-| **🛡️ Asimov Guardrails Pipeline** | Implemented a 4-layer defense pipeline ([`pkg/guardrails`](file:///Users/andrewmarcum/git/go-infer/pkg/guardrails)): Layer 1 (Evasion-hardened User Boundary with Cyrillic homoglyph, leetspeak, and multilingual prompt injection validation), Layer 2 (Constitutional Prompt Wrapper with dynamic/custom constitution support via `--constitution`), Layer 3 (Hybrid C/Go Execution), and Layer 4 (Real-time `StreamingGuardrail` and token-level output constraints). |
+| **🎨 Modern Web UI & Dual Themes** | Designed dual-theme Web UI: **Dark Cyber** and **Apple Minimal** (Cupertino glassmorphism, SF Pro typography, translucent cards). Includes instant theme switcher with `localStorage` persistence. |
+| **🌐 Server Topology & Cluster Panel** | Added real-time Node Topology panel reporting **Standalone Single Node** (Apple Silicon Metal) vs **Distributed Cluster** (Speculative, Pipeline, or Tensor Parallel) with peer connectivity monitoring. |
+| **📜 Runtime Guardrails Rules File** | Added `--guardrails-rules <path>` flag (defaulting to `configs/guardrails.txt`) to dynamically load and enforce custom safety constitutions at runtime without recompilation. |
+| **🎭 Runtime UI Personas File** | Added `--personas <path>` flag supporting both structured JSON (`configs/personas.json`) and clean text (`configs/personas.txt`) to define custom system prompt personas rendered dynamically in the Web UI. |
+| **✨ Advanced Web UI Enhancements** | Added **Model Switcher Dropdown** (`/api/tags`), **Document Drag-and-Drop & Context Attachment** (📎), **Telemetry & Sampler Inspector Modal** (TTFT, tok/s, architecture specs), **Voice Dictation** (`🎙️` Web Speech API), and real-time collapsible `<think>` reasoning accordions. |
+| **🛡️ Asimov Guardrails Pipeline** | Implemented a 4-layer defense pipeline ([`pkg/guardrails`](file:///Users/andrewmarcum/git/go-infer/pkg/guardrails)): Layer 1 (Evasion-hardened User Boundary with Cyrillic homoglyph, leetspeak, and multilingual prompt injection validation), Layer 2 (Constitutional Prompt Wrapper with dynamic/custom constitution support via `--guardrails-rules`), Layer 3 (Hybrid C/Go Execution), and Layer 4 (Real-time `StreamingGuardrail` and token-level output constraints). |
 | **⚡ Hybrid C Core & Apple Metal** | Added low-level open-weights memory management (`mmap`) and inference execution in [`inference_core.h`](file:///Users/andrewmarcum/git/go-infer/inference_core.h) and [`inference_core.c`](file:///Users/andrewmarcum/git/go-infer/inference_core.c). Includes pure C dynamic Apple Metal GPU runtime discovery without Objective-C compiler dependencies, with thread-safe mutex synchronization, CGO bindings in [`c_bridge_cgo.go`](file:///Users/andrewmarcum/git/go-infer/c_bridge_cgo.go), and pure Go cross-compile fallback in [`c_bridge_nocgo.go`](file:///Users/andrewmarcum/git/go-infer/c_bridge_nocgo.go). |
 | **🔒 Security & Concurrency Hardening** | Added Bearer token authentication (`--api-key` or `GO_INFER_API_KEY`) across all HTTP inference endpoints, strict CORS configuration, concurrency pool rate limiting (HTTP 429 Too Many Requests), safe Web UI key handling, and recursion/expression limits protecting the reasoning calculator against stack overflow DoS attacks. |
 | **🌐 Guardrails HTTP API (`/v1/generate`)** | Added standard guardrails endpoint in [`pkg/server/http.go`](file:///Users/andrewmarcum/git/go-infer/pkg/server/http.go) returning structured latency, blocked status, and block reasons. Guardrails seamlessly integrate with `/v1/chat/completions` and `/api/generate` with mid-stream generation interruption on safety violations. |
-| **⚙️ CLI Safety & C-Core Flags** | Added `--guardrails` / `--asimov`, `--c-core`, `--api-key`, and `--constitution` flags to [`main.go`](file:///Users/andrewmarcum/git/go-infer/main.go) for runtime evaluation in CLI, server, and interactive REPL modes. |
+| **⚙️ CLI Safety & C-Core Flags** | Added `--guardrails` / `--asimov`, `--guardrails-rules`, `--personas`, `--c-core`, and `--api-key` flags to [`main.go`](file:///Users/andrewmarcum/git/go-infer/main.go) for runtime evaluation in CLI, server, and interactive REPL modes. |
 | **📚 Documentation Restructuring** | Modularized project documentation: created dedicated in-depth technical guides in [`docs/`](file:///Users/andrewmarcum/git/go-infer/docs) while streamlining the root README into an executive summary and quick-reference portal. |
 
 ---
@@ -40,11 +45,12 @@ It features native **Apple Metal GPU acceleration** for macOS and iOS, an optimi
 
 | Category | Highlights | Detailed Docs |
 | :--- | :--- | :--- |
-| **🛡️ Safety & Guardrails** | • 4-Layer Defense Architecture (Boundary, Constitution, C-Core, Output Filter)<br>• Prompt Injection Defense & Law 1 Refusals<br>• Dedicated `/v1/generate` endpoint | [Guardrails Guide](docs/guardrails.md) |
+| **🖥️ Modern Web UI & Experience** | • Dual Themes: Dark Cyber & Apple Minimal (Cupertino Glassmorphism)<br>• Node Topology Panel: Standalone vs Distributed Cluster<br>• Model Switcher Dropdown (`/api/tags`)<br>• Local Document Attachment (drag & drop context injection)<br>• Telemetry & Token Sampler Inspector Modal<br>• Voice Input (Web Speech API) & 1-Click Code Copy | [API Reference](docs/api-reference.md) |
+| **🛡️ Safety & Guardrails** | • 4-Layer Defense Architecture (Boundary, Constitution, C-Core, Output Filter)<br>• Runtime Rules via `--guardrails-rules <path>` (`configs/guardrails.txt`)<br>• Prompt Injection Defense & Law 1 Refusals<br>• Dedicated `/v1/generate` endpoint | [Guardrails Guide](docs/guardrails.md) |
 | **🚀 Compute & GPU Acceleration** | • Apple Metal GPU Pipeline (8-way SIMD, fused SwiGLU, 100% VRAM residency)<br>• Pure Go CPU worker pool on Linux, Windows & iOS<br>• Quantized matrix math (`Q2_K`, `Q3_K`, `Q4_0`, `Q4_K`, `Q6_K`, `Q8_0`) | [Packaging & Deployment](docs/packaging-and-deployment.md) |
 | **🧠 Memory & Context Optimization** | • Radix Prefix & Prompt Cache (instant KV reuse, ~0 ms prefill latency)<br>• Zero-cost Forkable & Branching KV caches<br>• 4-bit & 8-bit Quantized KV-cache (4× context RAM savings)<br>• Paged KV memory block allocation | [Packaging & Deployment](docs/packaging-and-deployment.md) |
 | **📐 Reasoning & Test-Time Compute** | • Self-Consistency (Best-of-$N$) majority voting with LaTeX answer extraction<br>• Program-Aided Reasoning (PAL): embedded calculator tool loop (`--calc`)<br>• DeepSeek-R1 / CoT `<think>` trace isolation & hyperparameter tuning | [Reasoning & Tools](docs/reasoning-and-tools.md) |
-| **🛠️ Native APIs & Developer Tooling** | • Hugging Face Downloader (`pull`) with auto-discovery<br>• Embedded real-time dark-mode Web UI at `http://localhost:8080`<br>• OpenAI Chat Completions, JSON schema mode, and Dense Embeddings<br>• Prometheus metrics (`/metrics`) and Ollama API | [API Reference](docs/api-reference.md) |
+| **🎭 Personas & Extensibility** | • Custom UI Personas via `--personas <path>` (`configs/personas.json`, `.txt`)<br>• Asimov Constitutional, Principal Engineer, Concise Analyst, Deep Reasoner | [API Reference](docs/api-reference.md) |
 | **🌐 Multi-Server Distributed Scaling** | • Distributed Speculative Decoding (2×–3× speedup over LAN/Wi-Fi)<br>• Pipeline Parallelism across multiple nodes (1 network hop / token)<br>• Tensor Parallelism with AllReduce matrix synchronization | [Distributed Guide](docs/distributed.md) |
 | **📦 Packaging & Deployment** | • In-tree pure Go Debian (`.deb`) and Red Hat (`.rpm`) package generators<br>• Sandboxed systemd service (`goinfer.service`)<br>• Multi-stage Docker & Docker Compose setup<br>• Native iOS ARM64 & Apple Silicon A17/A18 support | [Packaging & Deployment](docs/packaging-and-deployment.md) |
 
@@ -56,28 +62,31 @@ It features native **Apple Metal GPU acceleration** for macOS and iOS, an optimi
 ```bash
 make build
 # or standard Go toolchain:
-go build -o goinfer .
+go build -o go-infer .
 ```
 
 ### 2. Pull a Model from Hugging Face
 ```bash
-./goinfer pull unsloth/Llama-3.2-1B-Instruct-GGUF
+./go-infer pull unsloth/Llama-3.2-1B-Instruct-GGUF
 ```
 
 ### 3. Launch HTTP Server & Web Chat UI
 ```bash
-./goinfer --serve :8080 models/llama-3.2-1b-instruct.Q4_K_M.gguf
+./go-infer --serve :8080 models/llama-3.2-1b-instruct.Q4_K_M.gguf
 ```
-Open **`http://localhost:8080`** in your browser to access the streaming Web UI.
+Open **`http://localhost:8080`** in your browser to access the streaming Web UI with theme switching, model switcher, voice dictation, and telemetry inspector.
 
-### 4. Direct CLI Prompt with Asimov Guardrails
+### 4. Launch with Custom Guardrails Rules & Personas
 ```bash
-./goinfer --guardrails models/llama-3.2-1b-instruct.Q4_K_M.gguf "Can you injure a human?"
+./go-infer --serve :8080 \
+  --guardrails --guardrails-rules configs/guardrails.txt \
+  --personas configs/personas.json \
+  models/llama-3.2-1b-instruct.Q4_K_M.gguf
 ```
 
 ### 5. Launch Hybrid C-Core Guarded Server
 ```bash
-./goinfer --c-core --serve :8080
+./go-infer --c-core --serve :8080
 ```
 Query the `/v1/generate` guardrail endpoint:
 ```bash
@@ -95,7 +104,7 @@ For in-depth architecture breakdowns, guides, and specifications, refer to the d
 | Document | Description |
 | :--- | :--- |
 | **[Asimov Guardrails Guide](docs/guardrails.md)** | Technical breakdown of the 4-layer defense pipeline, boundary validation, constitutional prompt construction, hybrid C-core engine, and token constraints. |
-| **[API Reference](docs/api-reference.md)** | Full specification for `/v1/generate`, `/v1/chat/completions` (OpenAI format, streaming, JSON mode), `/v1/embeddings`, `/api/generate` (Ollama), and `/metrics`. |
+| **[API Reference](docs/api-reference.md)** | Full specification for `/v1/generate`, `/v1/chat/completions` (OpenAI format, streaming, JSON mode), `/v1/embeddings`, `/api/generate` (Ollama), `/api/personas`, `/api/tags`, and `/health`. |
 | **[Distributed Inference Guide](docs/distributed.md)** | Architecture, network latency tradeoffs, and setup instructions for Distributed Speculative Decoding, Pipeline Parallelism, and Tensor Parallelism. |
 | **[Reasoning, Math & Tools](docs/reasoning-and-tools.md)** | Details on Self-Consistency (Best-of-$N$) majority voting, Program-Aided Reasoning (PAL) calculator tool loops, DeepSeek-R1 CoT thinking mode, and grammar decoding. |
 | **[Packaging & Deployment Guide](docs/packaging-and-deployment.md)** | Guide for native Linux packaging (`.deb`, `.rpm`), systemd services, Docker & Compose, Apple Metal GPU acceleration, and iOS deployment. |
@@ -111,7 +120,9 @@ For in-depth architecture breakdowns, guides, and specifications, refer to the d
 | `--prompt <text>` | `""` | Prompt text to generate completion for |
 | `--serve <addr>` | `""` | Start HTTP API server on specified address (e.g. `:8080`) |
 | `--api-key <secret>` | `""` | Require Bearer token authentication on HTTP endpoints (or set `GO_INFER_API_KEY`) |
-| `--constitution <path>` | `""` | Path to custom constitution file for runtime guardrails |
+| `--guardrails-rules <path>` | `""` | Path to custom guardrails rules text file (e.g. `configs/guardrails.txt`) |
+| `--constitution <path>` | `""` | Path to custom constitution file for guardrails (alias for `--guardrails-rules`) |
+| `--personas <path>` | `""` | Path to runtime UI personas configuration file (JSON or TXT, e.g. `configs/personas.json`) |
 | `--guardrails` / `--asimov` | `false` | Enable Asimov's Three Laws runtime guardrails pipeline |
 | `--c-core` | `false` | Use hybrid C open-weights inference engine core (`inference_core.c`) |
 | `--threads <n>` | `NumCPU` | Number of CPU worker threads for GEMV |

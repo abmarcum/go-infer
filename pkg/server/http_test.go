@@ -379,6 +379,90 @@ func TestServerCCoreChatCompletionAndHealth(t *testing.T) {
 	if len(chatResp.Choices) == 0 || chatResp.Choices[0].Message.Content != "Hello from C-Core" {
 		t.Errorf("Unexpected chat completion choice: %+v", chatResp.Choices)
 	}
+
+	// 3. Streaming Chat completion with C-Core fallback
+	streamBody := []byte(`{"model": "c-core-test", "messages": [{"role": "user", "content": "Ping"}], "stream": true}`)
+	recStream := httptest.NewRecorder()
+	reqStream := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(streamBody))
+	s.handleOpenAIChatCompletions(recStream, reqStream)
+	if recStream.Code != http.StatusOK {
+		t.Errorf("Expected 200 OK on C-Core streaming chat completion, got %d", recStream.Code)
+	}
+	streamOutput := recStream.Body.String()
+	if !strings.Contains(streamOutput, "data: ") || !strings.Contains(streamOutput, "[DONE]") {
+		t.Errorf("Expected SSE stream data with [DONE], got: %s", streamOutput)
+	}
+}
+
+func TestPersonasAndClusterHealth(t *testing.T) {
+	tmp := t.TempDir()
+	pJson := filepath.Join(tmp, "custom_personas.json")
+	jsonContent := `[
+		{"id": "tester", "name": "QA Tester", "description": "Rigorous tester", "system_prompt": "You test edge cases."}
+	]`
+	if err := os.WriteFile(pJson, []byte(jsonContent), 0644); err != nil {
+		t.Fatalf("failed to write test personas file: %v", err)
+	}
+
+	personas, err := LoadPersonasFromFile(pJson)
+	if err != nil {
+		t.Fatalf("LoadPersonasFromFile JSON failed: %v", err)
+	}
+	if len(personas) != 1 || personas[0].ID != "tester" {
+		t.Fatalf("unexpected personas: %+v", personas)
+	}
+
+	pTxt := filepath.Join(tmp, "custom_personas.txt")
+	txtContent := `[Architect]
+Description: Systems architect
+Prompt: Design scalable systems.
+`
+	if err := os.WriteFile(pTxt, []byte(txtContent), 0644); err != nil {
+		t.Fatalf("failed to write test personas txt file: %v", err)
+	}
+	personasTxt, err := LoadPersonasFromFile(pTxt)
+	if err != nil {
+		t.Fatalf("LoadPersonasFromFile TXT failed: %v", err)
+	}
+	if len(personasTxt) != 1 || personasTxt[0].Name != "Architect" {
+		t.Fatalf("unexpected personas from txt: %+v", personasTxt)
+	}
+
+	// Test Server /health and /api/personas
+	s := &Server{
+		ModelName:   "test-model",
+		DistMode:    "speculative",
+		DraftServer: "http://draft:8080",
+		Personas:    personas,
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	s.handleHealth(rec, req)
+
+	var healthResp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&healthResp); err != nil {
+		t.Fatalf("failed to decode health response: %v", err)
+	}
+
+	cluster, ok := healthResp["cluster"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing cluster in health response: %+v", healthResp)
+	}
+	if cluster["mode"] != "cluster" || cluster["is_standalone"] != false {
+		t.Errorf("expected cluster mode for speculative server, got %+v", cluster)
+	}
+
+	recP := httptest.NewRecorder()
+	reqP := httptest.NewRequest(http.MethodGet, "/api/personas", nil)
+	s.handlePersonas(recP, reqP)
+	var respPersonas []Persona
+	if err := json.NewDecoder(recP.Body).Decode(&respPersonas); err != nil {
+		t.Fatalf("failed to decode personas: %v", err)
+	}
+	if len(respPersonas) != 1 || respPersonas[0].ID != "tester" {
+		t.Errorf("unexpected personas response: %+v", respPersonas)
+	}
 }
 
 

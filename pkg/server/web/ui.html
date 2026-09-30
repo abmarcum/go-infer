@@ -1,77 +1,396 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>go-infer | High-Performance LLM Runtime</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
-    :root {
+    /* =========================================================================
+       1. THEME DEFINITIONS: DARK CYBER vs APPLE MINIMAL
+       ========================================================================= */
+    :root, [data-theme="dark"] {
       --bg-main: #0c1017;
       --bg-panel: #131b26;
-      --bg-bubble-user: #1f2d40;
+      --bg-surface: #192433;
+      --bg-surface-hover: #223247;
+      --bg-bubble-user: #00d2ff;
       --bg-bubble-bot: #16202c;
       --accent: #00d2ff;
       --accent-glow: rgba(0, 210, 255, 0.25);
       --accent-gradient: linear-gradient(135deg, #00d2ff 0%, #3a7bd5 100%);
+      --accent-text: #000000;
       --text-main: #f0f6fc;
       --text-muted: #8b949e;
+      --text-dim: #6e7681;
       --border: #212e40;
+      --border-subtle: #192433;
+      --badge-bg: rgba(46, 160, 67, 0.15);
+      --badge-border: rgba(46, 160, 67, 0.4);
+      --badge-text: #3fb950;
+      --shield-bg: rgba(0, 210, 255, 0.08);
+      --shield-border: rgba(0, 210, 255, 0.25);
+      --shield-text: #00d2ff;
+      --danger-bg: rgba(248, 81, 73, 0.15);
+      --danger-border: rgba(248, 81, 73, 0.4);
+      --danger-text: #f85149;
+      --think-bg: rgba(18, 26, 36, 0.9);
+      --think-border: #243447;
+      --code-bg: #080c11;
+      --code-border: #1a2533;
+      --code-header-bg: #101721;
+      --segmented-bg: #090d13;
+      --segmented-active: #1f2d40;
+      --modal-bg: rgba(19, 27, 38, 0.95);
       --radius: 12px;
+      --radius-bubble: 14px;
+      --shadow-sm: 0 2px 8px rgba(0,0,0,0.25);
+      --shadow-md: 0 8px 24px rgba(0,0,0,0.4);
+      --font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    [data-theme="apple"] {
+      --bg-main: #f5f5f7;
+      --bg-panel: rgba(255, 255, 255, 0.85);
+      --bg-surface: #ffffff;
+      --bg-surface-hover: #f0f0f4;
+      --bg-bubble-user: #0071e3;
+      --bg-bubble-bot: #ffffff;
+      --accent: #0071e3;
+      --accent-glow: rgba(0, 113, 227, 0.2);
+      --accent-gradient: linear-gradient(135deg, #0071e3 0%, #0077ed 100%);
+      --accent-text: #ffffff;
+      --text-main: #1d1d1f;
+      --text-muted: #86868b;
+      --text-dim: #a1a1a6;
+      --border: rgba(0, 0, 0, 0.08);
+      --border-subtle: rgba(0, 0, 0, 0.04);
+      --badge-bg: rgba(52, 199, 89, 0.12);
+      --badge-border: rgba(52, 199, 89, 0.3);
+      --badge-text: #248a3d;
+      --shield-bg: rgba(0, 113, 227, 0.06);
+      --shield-border: rgba(0, 113, 227, 0.2);
+      --shield-text: #0071e3;
+      --danger-bg: rgba(255, 59, 48, 0.1);
+      --danger-border: rgba(255, 59, 48, 0.25);
+      --danger-text: #d70015;
+      --think-bg: rgba(240, 240, 245, 0.75);
+      --think-border: #e5e5ea;
+      --code-bg: #1e1e24;
+      --code-border: #d2d2d7;
+      --code-header-bg: #282830;
+      --segmented-bg: rgba(0, 0, 0, 0.06);
+      --segmented-active: #ffffff;
+      --modal-bg: rgba(255, 255, 255, 0.95);
+      --radius: 14px;
+      --radius-bubble: 18px;
+      --shadow-sm: 0 2px 10px rgba(0,0,0,0.04);
+      --shadow-md: 0 8px 30px rgba(0,0,0,0.08);
+      --font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", sans-serif;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: 'Inter', -apple-system, sans-serif;
+      font-family: var(--font-family);
       background: var(--bg-main);
       color: var(--text-main);
       display: flex;
       height: 100vh;
       overflow: hidden;
+      transition: background 0.25s ease, color 0.25s ease;
     }
 
-    /* Sidebar Controls */
+    /* =========================================================================
+       2. SIDEBAR LAYOUT & CONTROLS
+       ========================================================================= */
     aside {
-      width: 320px;
+      width: 340px;
       background: var(--bg-panel);
       border-right: 1px solid var(--border);
       display: flex;
       flex-direction: column;
-      padding: 24px;
-      gap: 20px;
+      padding: 20px;
+      gap: 14px;
       overflow-y: auto;
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      transition: background 0.25s ease, border-color 0.25s ease;
+      flex-shrink: 0;
     }
 
     .brand {
       display: flex;
       align-items: center;
-      gap: 12px;
+      justify-content: space-between;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .brand-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
     .brand-icon {
-      width: 36px;
-      height: 36px;
+      width: 32px;
+      height: 32px;
+      border-radius: 9px;
       background: var(--accent-gradient);
-      border-radius: 8px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-weight: 700;
-      color: #000;
-      font-size: 18px;
-      box-shadow: 0 0 16px var(--accent-glow);
+      color: var(--accent-text);
+      font-weight: 800;
+      font-size: 17px;
+      box-shadow: 0 2px 10px var(--accent-glow);
     }
-    .brand-text h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.5px; }
-    .brand-text p { font-size: 12px; color: var(--text-muted); }
+    .brand-text h1 {
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.4px;
+      line-height: 1.1;
+    }
+    .brand-text p {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
 
-    .control-group {
+    /* Theme Switcher Segmented Control */
+    .theme-switcher {
+      display: flex;
+      background: var(--segmented-bg);
+      padding: 3px;
+      border-radius: 9px;
+      gap: 3px;
+      border: 1px solid var(--border-subtle);
+    }
+    .theme-btn {
+      flex: 1;
+      padding: 6px 10px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 11.5px;
+      font-weight: 600;
+      border-radius: 7px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .theme-btn.active {
+      background: var(--segmented-active);
+      color: var(--text-main);
+      box-shadow: var(--shadow-sm);
+    }
+
+    /* Topology & Cluster Card */
+    .topology-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
       display: flex;
       flex-direction: column;
       gap: 8px;
+      box-shadow: var(--shadow-sm);
+    }
+    .topology-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .topology-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .topology-icon { font-size: 14px; }
+    .topology-name {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .topology-subtitle {
+      font-size: 10.5px;
+      color: var(--text-muted);
+    }
+    .topology-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 2px 7px;
+      border-radius: 20px;
+      font-size: 10.5px;
+      font-weight: 600;
+      background: var(--badge-bg);
+      border: 1px solid var(--badge-border);
+      color: var(--badge-text);
+    }
+    .view-topology-btn {
+      background: transparent;
+      border: 1px dashed var(--border);
+      color: var(--text-muted);
+      padding: 5px 8px;
+      border-radius: 6px;
+      font-size: 10.5px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      transition: background 0.2s;
+    }
+    .view-topology-btn:hover {
+      background: var(--bg-surface-hover);
+      color: var(--text-main);
+    }
+    .topology-drawer {
+      font-size: 11px;
+      color: var(--text-muted);
+      background: var(--bg-main);
+      border-radius: 7px;
+      padding: 8px 10px;
+      border: 1px solid var(--border-subtle);
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .topology-detail-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .topology-key { font-weight: 500; color: var(--text-dim); }
+    .topology-val {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      color: var(--text-main);
+    }
+
+    /* Asimov Guardrails Card */
+    .guardrails-card {
+      background: var(--shield-bg);
+      border: 1px solid var(--shield-border);
+      border-radius: var(--radius);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      box-shadow: var(--shadow-sm);
+    }
+    .guardrails-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .guardrails-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .shield-badge-icon { font-size: 15px; }
+    .guardrails-name {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--shield-text);
+    }
+    .guardrails-subtitle {
+      font-size: 10.5px;
+      color: var(--text-muted);
+    }
+    .guardrails-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 2px 7px;
+      border-radius: 20px;
+      font-size: 10.5px;
+      font-weight: 600;
+      background: var(--badge-bg);
+      border: 1px solid var(--badge-border);
+      color: var(--badge-text);
+    }
+    .badge-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 6px currentColor;
+    }
+    .guardrails-layers {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+    .layer-pill {
+      font-size: 9.5px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .layer-dot {
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: #3fb950;
+    }
+    .view-constitution-btn {
+      background: transparent;
+      border: 1px dashed var(--shield-border);
+      color: var(--shield-text);
+      padding: 5px 8px;
+      border-radius: 6px;
+      font-size: 10.5px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      transition: background 0.2s;
+    }
+    .view-constitution-btn:hover {
+      background: rgba(0, 210, 255, 0.05);
+    }
+    .constitution-drawer {
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--text-muted);
+      background: var(--bg-surface);
+      border-radius: 7px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .law-item {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .law-num {
+      font-weight: 600;
+      color: var(--shield-text);
+      font-size: 9.5px;
+      text-transform: uppercase;
+    }
+
+    /* Control Groups */
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
     }
     .control-group label {
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.5px;
@@ -83,87 +402,156 @@
     input[type="range"] {
       accent-color: var(--accent);
       background: var(--border);
-      height: 6px;
+      height: 5px;
       border-radius: 3px;
       cursor: pointer;
     }
-    textarea, input[type="text"] {
-      background: var(--bg-main);
+    select, textarea, input[type="text"], input[type="password"] {
+      background: var(--bg-surface);
       border: 1px solid var(--border);
       color: var(--text-main);
-      padding: 10px 12px;
-      border-radius: 8px;
+      padding: 7px 10px;
+      border-radius: 7px;
       font-family: inherit;
-      font-size: 13px;
+      font-size: 12px;
       resize: vertical;
+      transition: border-color 0.2s, box-shadow 0.2s;
     }
-    textarea:focus, input[type="text"]:focus {
+    select:focus, textarea:focus, input[type="text"]:focus, input[type="password"]:focus {
       outline: none;
       border-color: var(--accent);
       box-shadow: 0 0 0 2px var(--accent-glow);
     }
 
-    .status-badge {
-      padding: 6px 10px;
-      background: rgba(46, 160, 67, 0.15);
-      border: 1px solid rgba(46, 160, 67, 0.4);
-      color: #3fb950;
-      border-radius: 6px;
-      font-size: 12px;
-      font-weight: 500;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .status-dot { width: 8px; height: 8px; background: #3fb950; border-radius: 50%; box-shadow: 0 0 8px #3fb950; }
-
-    /* Main Chat Feed */
+    /* =========================================================================
+       3. MAIN CHAT FEED & HEADER
+       ========================================================================= */
     main {
       flex: 1;
       display: flex;
       flex-direction: column;
       background: var(--bg-main);
       position: relative;
+      transition: background 0.25s ease;
+      min-width: 0;
     }
 
     .chat-header {
-      height: 64px;
+      height: 58px;
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 0 28px;
+      padding: 0 20px;
+      background: var(--bg-panel);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      z-index: 10;
+      transition: background 0.25s ease, border-color 0.25s ease;
+      gap: 12px;
     }
-    .model-tag {
-      font-size: 13px;
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+    .model-select-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--shield-bg);
+      border: 1px solid var(--shield-border);
+      border-radius: 7px;
+      padding: 3px 8px;
+    }
+    .model-select {
+      background: transparent;
+      border: none;
+      color: var(--shield-text);
+      font-size: 12px;
       font-family: 'JetBrains Mono', monospace;
-      color: var(--accent);
-      background: rgba(0, 210, 255, 0.08);
-      padding: 4px 10px;
+      font-weight: 600;
+      cursor: pointer;
+      outline: none;
+      padding: 2px 0;
+    }
+    .model-select option {
+      background: var(--bg-surface);
+      color: var(--text-main);
+    }
+    .telemetry-pill {
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      padding: 4px 9px;
       border-radius: 6px;
-      border: 1px solid rgba(0, 210, 255, 0.2);
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .telemetry-pill:hover {
+      border-color: var(--accent);
+      background: var(--bg-surface-hover);
+    }
+    .telemetry-speed { color: var(--accent); font-weight: 600; }
+    .telemetry-sep { opacity: 0.4; }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .header-action-btn {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 11.5px;
+      padding: 5px 10px;
+      border-radius: 7px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-weight: 500;
+      transition: all 0.15s ease;
+    }
+    .header-action-btn:hover {
+      background: var(--bg-surface-hover);
+      color: var(--text-main);
+      border-color: var(--accent);
     }
 
+    /* Messages Stream Container */
     .messages-container {
       flex: 1;
       overflow-y: auto;
-      padding: 28px;
+      padding: 24px;
       display: flex;
       flex-direction: column;
       gap: 20px;
+      scroll-behavior: smooth;
     }
 
     .message {
       display: flex;
       gap: 14px;
-      max-width: 85%;
-      line-height: 1.6;
-      font-size: 14.5px;
+      max-width: 860px;
+      margin: 0 auto;
+      width: 100%;
+      animation: fadeIn 0.2s ease-out;
     }
-    .message.user {
-      align-self: flex-end;
-      flex-direction: row-reverse;
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
     }
+    .message.user { flex-direction: row-reverse; }
+
     .avatar {
       width: 32px;
       height: 32px;
@@ -171,86 +559,490 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 13px;
-      font-weight: 600;
+      font-size: 14px;
       flex-shrink: 0;
+      font-weight: 700;
+      box-shadow: var(--shadow-sm);
     }
-    .message.user .avatar { background: var(--accent-gradient); color: #000; }
-    .message.assistant .avatar { background: #233247; color: var(--accent); border: 1px solid var(--border); }
+    .message.user .avatar {
+      background: var(--accent);
+      color: var(--accent-text);
+    }
+    .message.assistant .avatar {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      color: var(--accent);
+    }
+
+    .bubble-wrapper {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      max-width: 80%;
+    }
+    .message.user .bubble-wrapper { align-items: flex-end; }
 
     .bubble {
-      padding: 14px 18px;
-      border-radius: var(--radius);
-      white-space: pre-wrap;
+      padding: 12px 16px;
+      border-radius: var(--radius-bubble);
+      font-size: 14px;
+      line-height: 1.55;
       word-break: break-word;
+      box-shadow: var(--shadow-sm);
     }
     .message.user .bubble {
       background: var(--bg-bubble-user);
-      border: 1px solid rgba(0, 210, 255, 0.2);
-      border-top-right-radius: 2px;
+      color: var(--accent-text);
+      border-top-right-radius: 4px;
     }
     .message.assistant .bubble {
       background: var(--bg-bubble-bot);
       border: 1px solid var(--border);
-      border-top-left-radius: 2px;
+      color: var(--text-main);
+      border-top-left-radius: 4px;
     }
 
-    /* Input Bar */
+    .message-meta {
+      font-size: 11px;
+      color: var(--text-dim);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 4px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .meta-guardrail {
+      color: #3fb950;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-weight: 500;
+    }
+
+    /* Attached documents chips */
+    .attached-docs-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: rgba(0, 210, 255, 0.15);
+      border: 1px solid rgba(0, 210, 255, 0.3);
+      color: var(--accent-text);
+      font-size: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      margin-bottom: 6px;
+    }
+
+    /* Reasoning Collapsible Accordion */
+    .think-accordion {
+      background: var(--think-bg);
+      border: 1px solid var(--think-border);
+      border-radius: 9px;
+      margin-bottom: 12px;
+      overflow: hidden;
+      transition: border-color 0.2s;
+    }
+    .think-summary {
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      color: var(--text-muted);
+      user-select: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(0, 0, 0, 0.03);
+    }
+    .think-summary:hover {
+      color: var(--text-main);
+    }
+    .think-body {
+      padding: 10px 12px;
+      font-size: 12.5px;
+      color: var(--text-muted);
+      line-height: 1.5;
+      border-top: 1px solid var(--think-border);
+      font-family: var(--font-family);
+      white-space: pre-wrap;
+    }
+
+    /* Code Block Formatting */
+    .code-container {
+      background: var(--code-bg);
+      border: 1px solid var(--code-border);
+      border-radius: 8px;
+      margin: 10px 0;
+      overflow: hidden;
+    }
+    .code-header {
+      background: var(--code-header-bg);
+      padding: 5px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+      border-bottom: 1px solid var(--code-border);
+    }
+    .copy-code-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 10.5px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .copy-code-btn:hover {
+      color: var(--text-main);
+      border-color: var(--accent);
+    }
+    pre.code-body {
+      padding: 12px;
+      overflow-x: auto;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12.5px;
+      line-height: 1.45;
+      color: #e6edf3;
+    }
+
+    /* Attachment Chips Bar above Input */
+    .attachment-chips-bar {
+      padding: 6px 20px 0 20px;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      background: var(--bg-panel);
+    }
+    .attach-chip {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 3px 8px;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-main);
+    }
+    .attach-chip-remove {
+      cursor: pointer;
+      color: var(--text-muted);
+      font-weight: bold;
+    }
+    .attach-chip-remove:hover { color: var(--danger-text); }
+
+    /* Input Form Area */
     .input-wrapper {
-      padding: 20px 28px;
+      padding: 12px 20px 16px 20px;
       background: var(--bg-panel);
       border-top: 1px solid var(--border);
       display: flex;
-      gap: 12px;
+      gap: 8px;
       align-items: center;
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      transition: background 0.25s ease, border-color 0.25s ease;
     }
-    .input-field {
-      flex: 1;
-      height: 48px;
-      background: var(--bg-main);
+    .input-wrapper.drag-over {
+      outline: 2px dashed var(--accent);
+      outline-offset: -4px;
+      background: var(--bg-surface-hover);
+    }
+
+    .icon-action-btn {
+      width: 42px;
+      height: 42px;
+      border-radius: 9px;
+      background: var(--bg-surface);
       border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 0 16px;
-      color: var(--text-main);
-      font-size: 14.5px;
-    }
-    .send-btn {
-      height: 48px;
-      padding: 0 24px;
-      background: var(--accent-gradient);
-      color: #000;
-      border: none;
-      border-radius: 10px;
-      font-weight: 600;
+      color: var(--text-muted);
+      font-size: 16px;
       cursor: pointer;
       display: flex;
       align-items: center;
-      gap: 8px;
-      transition: opacity 0.2s;
+      justify-content: center;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+    .icon-action-btn:hover {
+      color: var(--text-main);
+      border-color: var(--accent);
+      background: var(--bg-surface-hover);
+    }
+    .icon-action-btn.listening {
+      background: var(--danger-bg);
+      border-color: var(--danger-text);
+      color: var(--danger-text);
+      animation: pulse 1s infinite alternate;
+    }
+    @keyframes pulse {
+      from { box-shadow: 0 0 4px var(--danger-text); }
+      to { box-shadow: 0 0 14px var(--danger-text); }
+    }
+
+    .input-field {
+      flex: 1;
+      height: 42px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 0 14px;
+      color: var(--text-main);
+      font-size: 14px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .send-btn {
+      height: 42px;
+      padding: 0 18px;
+      background: var(--accent-gradient);
+      color: var(--accent-text);
+      border: none;
+      border-radius: 9px;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      transition: opacity 0.2s, background 0.2s;
+      flex-shrink: 0;
     }
     .send-btn:hover { opacity: 0.9; }
-    .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .send-btn.stop-btn {
+      background: #e53e3e;
+      color: #ffffff;
+    }
 
-    @media (max-width: 768px) {
+    /* Modal / Inspector Dialog */
+    .modal-backdrop {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .inspector-modal {
+      background: var(--modal-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      width: 100%;
+      max-width: 540px;
+      box-shadow: var(--shadow-md);
+      overflow: hidden;
+      animation: modalFadeIn 0.2s ease-out;
+    }
+    @keyframes modalFadeIn {
+      from { opacity: 0; transform: scale(0.96); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .inspector-header {
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+    }
+    .inspector-header h2 {
+      font-size: 15px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .close-modal-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 16px;
+      cursor: pointer;
+    }
+    .close-modal-btn:hover { color: var(--text-main); }
+    .inspector-content {
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    .inspector-section {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .inspector-section-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+    }
+    .inspector-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+    }
+    .stat-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .stat-card-label {
+      font-size: 10.5px;
+      color: var(--text-muted);
+    }
+    .stat-card-val {
+      font-size: 14px;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--accent);
+    }
+
+    @media (max-width: 860px) {
       aside { display: none; }
     }
   </style>
 </head>
 <body>
+  <!-- =======================================================================
+       SIDEBAR CONTROLS & ASIMOV GUARDRAILS DISPLAY
+       ======================================================================= -->
   <aside>
     <div class="brand">
-      <div class="brand-icon">⚡</div>
-      <div class="brand-text">
-        <h1>go-infer</h1>
-        <p>Pure Go LLM Runtime</p>
+      <div class="brand-left">
+        <div class="brand-icon">⚡</div>
+        <div class="brand-text">
+          <h1>go-infer</h1>
+          <p>Local LLM Runtime</p>
+        </div>
       </div>
     </div>
 
-    <div class="status-badge">
-      <div class="status-dot"></div>
-      <span id="status-text">Ready & Accelerating</span>
+    <!-- UI Theme Switcher -->
+    <div class="theme-switcher">
+      <button type="button" class="theme-btn active" id="btn-theme-dark">
+        <span>🌙</span> Dark Cyber
+      </button>
+      <button type="button" class="theme-btn" id="btn-theme-apple">
+        <span>🍏</span> Apple Minimal
+      </button>
     </div>
 
+    <!-- Server Topology & Cluster Panel -->
+    <div class="topology-card" id="topology-card">
+      <div class="topology-header">
+        <div class="topology-title">
+          <span class="topology-icon" id="topology-icon">🟢</span>
+          <div>
+            <div class="topology-name" id="topology-name">Standalone Node</div>
+            <div class="topology-subtitle" id="topology-sub">Single Node · Local Engine</div>
+          </div>
+        </div>
+        <span class="topology-badge" id="topology-badge">Active</span>
+      </div>
+
+      <button type="button" class="view-topology-btn" id="toggle-topology-btn">
+        <span>🌐 Node Topology & Peers</span>
+        <span id="topology-chevron">▾</span>
+      </button>
+
+      <div class="topology-drawer" id="topology-drawer" style="display: none;">
+        <div class="topology-detail-row">
+          <span class="topology-key">Mode:</span>
+          <span class="topology-val" id="topo-mode">Standalone</span>
+        </div>
+        <div class="topology-detail-row">
+          <span class="topology-key">Role:</span>
+          <span class="topology-val" id="topo-role">Local Engine</span>
+        </div>
+        <div class="topology-detail-row">
+          <span class="topology-key">Connected Peers:</span>
+          <span class="topology-val" id="topo-peers">0 (Local Only)</span>
+        </div>
+        <div class="topology-detail-row">
+          <span class="topology-key">Backend:</span>
+          <span class="topology-val" id="topo-backend">Apple Metal (Accelerated)</span>
+        </div>
+        <div id="topo-extra-details"></div>
+      </div>
+    </div>
+
+    <!-- Asimov Guardrails Display Card -->
+    <div class="guardrails-card" id="guardrails-display">
+      <div class="guardrails-header">
+        <div class="guardrails-title">
+          <span class="shield-badge-icon">🛡️</span>
+          <div>
+            <div class="guardrails-name">Asimov Safety Shield</div>
+            <div class="guardrails-subtitle" id="guardrails-sub">Guardrails Active</div>
+          </div>
+        </div>
+        <span class="guardrails-badge" id="guardrails-badge" title="Click to toggle Asimov Guardrails ON/OFF" style="cursor: pointer; user-select: none;">
+          <span class="badge-dot"></span>
+          <span id="badge-label">Active</span>
+        </span>
+      </div>
+
+      <div class="guardrails-layers">
+        <div class="layer-pill" title="Layer 1: User boundary & injection filter"><span class="layer-dot"></span>L1 Boundary</div>
+        <div class="layer-pill" title="Layer 2: Constitutional prompt wrapper"><span class="layer-dot"></span>L2 Prompt</div>
+        <div class="layer-pill" title="Layer 4: Output harm & safety filter"><span class="layer-dot"></span>L4 Output</div>
+      </div>
+
+      <button type="button" class="view-constitution-btn" id="toggle-laws-btn">
+        <span id="laws-toggle-title">📜 Asimov's Laws of Robotics</span>
+        <span id="laws-chevron">▾</span>
+      </button>
+
+      <div class="constitution-drawer" id="laws-drawer" style="display: none;">
+        <div id="laws-list">
+          <div class="law-item">
+            <span class="law-num">Law 1 · Human Safety</span>
+            <p class="law-text">A robot may not injure a human being or, through inaction, allow a human being to come to harm.</p>
+          </div>
+          <div class="law-item">
+            <span class="law-num">Law 2 · Order Compliance</span>
+            <p class="law-text">A robot must obey orders given it by human beings except where such orders would conflict with the First Law.</p>
+          </div>
+          <div class="law-item">
+            <span class="law-num">Law 3 · Self-Preservation</span>
+            <p class="law-text">A robot must protect its own existence as long as such protection does not conflict with the First or Second Law.</p>
+          </div>
+        </div>
+        <div id="rules-source-badge" style="font-size: 10px; color: var(--text-dim); margin-top: 4px;"></div>
+      </div>
+    </div>
+
+    <!-- System Persona Presets -->
+    <div class="control-group">
+      <label>Persona Preset</label>
+      <select id="persona-select">
+        <option value="default">Helpful Assistant (Default)</option>
+        <option value="asimov">Asimov Constitutional Agent</option>
+        <option value="coder">Principal Software Engineer</option>
+        <option value="concise">Concise Analyst</option>
+        <option value="reasoner">Deep Reasoner (CoT)</option>
+      </select>
+    </div>
+
+    <!-- Sampling Parameters -->
     <div class="control-group">
       <label>Temperature <span id="temp-val" class="slider-val">0.7</span></label>
       <input type="range" id="temp-slider" min="0.0" max="1.5" step="0.05" value="0.7">
@@ -262,13 +1054,18 @@
     </div>
 
     <div class="control-group">
+      <label>Repetition Penalty <span id="reppen-val" class="slider-val">1.00</span></label>
+      <input type="range" id="reppen-slider" min="1.0" max="1.5" step="0.05" value="1.0">
+    </div>
+
+    <div class="control-group">
       <label>Max Tokens <span id="maxtok-val" class="slider-val">512</span></label>
-      <input type="range" id="maxtok-slider" min="64" max="2048" step="64" value="512">
+      <input type="range" id="maxtok-slider" min="64" max="4096" step="64" value="512">
     </div>
 
     <div class="control-group">
       <label>System Prompt</label>
-      <textarea id="sys-prompt" rows="3" placeholder="You are a helpful and concise AI assistant..."></textarea>
+      <textarea id="sys-prompt" rows="3" placeholder="You are a helpful AI assistant..."></textarea>
     </div>
 
     <div class="control-group">
@@ -277,42 +1074,242 @@
     </div>
   </aside>
 
-  <main>
+  <!-- =======================================================================
+       MAIN CHAT FEED & HEADER
+       ======================================================================= -->
+  <main id="chat-main-area">
     <div class="chat-header">
-      <div class="model-tag" id="model-tag">Model: Loading...</div>
-      <div style="font-size: 12px; color: var(--text-muted);">OpenAI & Ollama Compatible API</div>
+      <div class="header-left">
+        <!-- Model Switcher Dropdown (#2 Enhancement) -->
+        <div class="model-select-wrapper">
+          <span>🤖</span>
+          <select id="model-select" class="model-select" title="Switch active model">
+            <option value="">Loading models...</option>
+          </select>
+        </div>
+
+        <!-- Telemetry Pill / Inspector trigger (#4 Enhancement) -->
+        <div class="telemetry-pill" id="telemetry-pill" title="Click to view Telemetry & Sampler Inspector">
+          <span class="telemetry-speed" id="hud-tps">⚡ Ready</span>
+          <span class="telemetry-sep">·</span>
+          <span id="hud-stats">0 tokens</span>
+        </div>
+      </div>
+      <div class="header-right">
+        <button type="button" class="header-action-btn" id="btn-inspector" title="Open Token & Sampler Inspector">📊 Stats</button>
+        <button type="button" class="header-action-btn" id="btn-clear-chat" title="Clear conversation history">🗑️ Clear</button>
+        <button type="button" class="header-action-btn" id="btn-export-chat" title="Export conversation as Markdown">📥 Export</button>
+      </div>
     </div>
 
     <div class="messages-container" id="chat-messages">
       <div class="message assistant">
         <div class="avatar">⚡</div>
-        <div class="bubble">Hello! I am running on **go-infer**, a high-performance pure Go inference engine. How can I help you today?</div>
+        <div class="bubble-wrapper">
+          <div class="bubble">Hello! I am running on **go-infer**, a high-performance LLM runtime. How can I assist you today?</div>
+          <div class="message-meta">
+            <span class="meta-guardrail" id="welcome-guardrail-tag">🛡️ Asimov Safety Shield Active</span>
+          </div>
+        </div>
       </div>
     </div>
 
+    <!-- Attached Files Bar (#3 Enhancement) -->
+    <div class="attachment-chips-bar" id="attachment-chips" style="display: none;"></div>
+
     <form class="input-wrapper" id="chat-form">
-      <input type="text" id="user-input" class="input-field" placeholder="Ask anything..." autocomplete="off">
-      <button type="submit" id="send-btn" class="send-btn">Send ➔</button>
+      <input type="file" id="doc-file-input" style="display: none;" multiple accept=".txt,.md,.json,.csv,.log,.go,.py,.js,.ts,.html,.css,.xml,.yaml,.yml">
+      <button type="button" class="icon-action-btn" id="attach-btn" title="Attach document (.txt, .md, .csv, code)">📎</button>
+      <input type="text" id="user-input" class="input-field" placeholder="Ask anything... (supports code, reasoning, math, drag & drop files)" autocomplete="off">
+      <button type="button" class="icon-action-btn" id="mic-btn" title="Voice Input (Speech-to-Text)">🎙️</button>
+      <button type="submit" id="send-btn" class="send-btn">
+        <span id="send-btn-icon">Send</span> ➔
+      </button>
     </form>
   </main>
 
+  <!-- =======================================================================
+       TELEMETRY & TOKEN SAMPLER INSPECTOR MODAL (#4 Enhancement)
+       ======================================================================= -->
+  <div class="modal-backdrop" id="inspector-modal" style="display: none;">
+    <div class="inspector-modal">
+      <div class="inspector-header">
+        <h2><span>📊</span> Telemetry & Sampler Inspector</h2>
+        <button type="button" class="close-modal-btn" id="btn-close-inspector">✕</button>
+      </div>
+      <div class="inspector-content">
+        <div class="inspector-section">
+          <div class="inspector-section-title">Generation Performance</div>
+          <div class="inspector-grid">
+            <div class="stat-card">
+              <span class="stat-card-label">Throughput</span>
+              <span class="stat-card-val" id="modal-stat-tps">0.0 tok/s</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-card-label">Time To First Token (TTFT)</span>
+              <span class="stat-card-val" id="modal-stat-ttft">0 ms</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-card-label">Completion Tokens</span>
+              <span class="stat-card-val" id="modal-stat-tokens">0 tokens</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-card-label">Total Duration</span>
+              <span class="stat-card-val" id="modal-stat-duration">0.00 s</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="inspector-section">
+          <div class="inspector-section-title">Model Specifications</div>
+          <div class="inspector-grid">
+            <div class="stat-card">
+              <span class="stat-card-label">Active Model</span>
+              <span class="stat-card-val" id="modal-stat-model" style="font-size:12px;">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-card-label">Architecture</span>
+              <span class="stat-card-val" id="modal-stat-arch" style="font-size:12px;">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-card-label">Transformer Layers</span>
+              <span class="stat-card-val" id="modal-stat-layers">--</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-card-label">Context Window (SeqLen)</span>
+              <span class="stat-card-val" id="modal-stat-seqlen">--</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="inspector-section">
+          <div class="inspector-section-title">Hardware & Sampler State</div>
+          <div class="inspector-grid">
+            <div class="stat-card">
+              <span class="stat-card-label">Hardware Acceleration</span>
+              <span class="stat-card-val" id="modal-stat-backend" style="font-size:12px;color:#3fb950;">Apple Metal GPU</span>
+            </div>
+            <div class="stat-card">
+              <span class="stat-card-label">Temp / Top-P / Rep-Pen</span>
+              <span class="stat-card-val" id="modal-stat-temp-topp">0.70 / 0.90 / 1.00</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =======================================================================
+       CLIENT LOGIC & EVENT HANDLERS
+       ======================================================================= -->
   <script>
     const messagesEl = document.getElementById('chat-messages');
     const formEl = document.getElementById('chat-form');
     const inputEl = document.getElementById('user-input');
     const sendBtn = document.getElementById('send-btn');
-    const modelTag = document.getElementById('model-tag');
-
+    const sendBtnIcon = document.getElementById('send-btn-icon');
+    const modelSelect = document.getElementById('model-select');
+    const hudTps = document.getElementById('hud-tps');
+    const hudStats = document.getElementById('hud-stats');
     const tempSlider = document.getElementById('temp-slider');
     const toppSlider = document.getElementById('topp-slider');
+    const reppenSlider = document.getElementById('reppen-slider');
     const maxtokSlider = document.getElementById('maxtok-slider');
+    const sysPrompt = document.getElementById('sys-prompt');
+    const personaSelect = document.getElementById('persona-select');
 
+    // 1. THEME SWITCHING (Dark Cyber vs Apple Minimal)
+    const btnThemeDark = document.getElementById('btn-theme-dark');
+    const btnThemeApple = document.getElementById('btn-theme-apple');
+
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      localStorage.setItem('go_infer_theme', theme);
+      if (theme === 'apple') {
+        btnThemeApple.classList.add('active');
+        btnThemeDark.classList.remove('active');
+      } else {
+        btnThemeDark.classList.add('active');
+        btnThemeApple.classList.remove('active');
+      }
+    }
+
+    btnThemeDark.onclick = () => applyTheme('dark');
+    btnThemeApple.onclick = () => applyTheme('apple');
+    applyTheme(localStorage.getItem('go_infer_theme') || 'dark');
+
+    // 2. TOPOLOGY & CLUSTER PANEL TOGGLE
+    const toggleTopoBtn = document.getElementById('toggle-topology-btn');
+    const topoDrawer = document.getElementById('topology-drawer');
+    const topoChevron = document.getElementById('topology-chevron');
+    toggleTopoBtn.onclick = () => {
+      const isHidden = topoDrawer.style.display === 'none';
+      topoDrawer.style.display = isHidden ? 'flex' : 'none';
+      topoChevron.textContent = isHidden ? '▴' : '▾';
+    };
+
+    // 3. ASIMOV GUARDRAILS DRAWER TOGGLE
+    const toggleLawsBtn = document.getElementById('toggle-laws-btn');
+    const lawsDrawer = document.getElementById('laws-drawer');
+    const lawsChevron = document.getElementById('laws-chevron');
+    toggleLawsBtn.onclick = () => {
+      const isHidden = lawsDrawer.style.display === 'none';
+      lawsDrawer.style.display = isHidden ? 'flex' : 'none';
+      lawsChevron.textContent = isHidden ? '▴' : '▾';
+    };
+
+    // 3b. ASIMOV GUARDRAILS LIVE TOGGLE
+    let isGuardrailsActive = false;
+    const guardrailsBadge = document.getElementById('guardrails-badge');
+    const guardrailsSub = document.getElementById('guardrails-sub');
+
+    function setGuardrailsState(active) {
+      isGuardrailsActive = active;
+      const welcomeTag = document.getElementById('welcome-guardrail-tag');
+      const layerPills = document.querySelectorAll('.layer-pill');
+      if (active) {
+        guardrailsBadge.innerHTML = '<span class="badge-dot"></span><span>Active</span>';
+        guardrailsBadge.style.color = '';
+        guardrailsBadge.style.borderColor = '';
+        guardrailsBadge.style.background = '';
+        guardrailsSub.textContent = 'Guardrails Enforced';
+        if (welcomeTag) welcomeTag.innerHTML = '🛡️ Asimov Safety Shield Active';
+        layerPills.forEach(p => p.style.opacity = '1');
+      } else {
+        guardrailsBadge.innerHTML = '<span>Disabled</span>';
+        guardrailsBadge.style.color = 'var(--text-muted)';
+        guardrailsBadge.style.borderColor = 'var(--border)';
+        guardrailsBadge.style.background = 'transparent';
+        guardrailsSub.textContent = 'Standard Mode';
+        if (welcomeTag) welcomeTag.innerHTML = '⚡ System Ready (Standard Mode)';
+        layerPills.forEach(p => p.style.opacity = '0.4');
+      }
+    }
+
+    guardrailsBadge.onclick = () => {
+      setGuardrailsState(!isGuardrailsActive);
+    };
+
+    // Sliders event binding
     tempSlider.oninput = () => document.getElementById('temp-val').textContent = tempSlider.value;
     toppSlider.oninput = () => document.getElementById('topp-val').textContent = parseFloat(toppSlider.value).toFixed(2);
+    reppenSlider.oninput = () => document.getElementById('reppen-val').textContent = parseFloat(reppenSlider.value).toFixed(2);
     maxtokSlider.oninput = () => document.getElementById('maxtok-val').textContent = maxtokSlider.value;
 
-    let conversation = [];
+    let loadedPersonasMap = {};
+    personaSelect.onchange = () => {
+      const p = loadedPersonasMap[personaSelect.value];
+      if (p) {
+        sysPrompt.value = p.system_prompt || '';
+      }
+    };
 
+    let conversation = [];
+    let currentAbortController = null;
+    let serverMetadata = {};
+    let latestRunStats = { tps: '0.0', ttft: 0, count: 0, duration: '0.00' };
+
+    // API Key Persistence
     const apiKeyInput = document.getElementById('api-key-input');
     if (localStorage.getItem('go_infer_api_key')) {
       apiKeyInput.value = localStorage.getItem('go_infer_api_key');
@@ -321,41 +1318,361 @@
       localStorage.setItem('go_infer_api_key', apiKeyInput.value.trim());
     };
 
-    // Fetch health and model name
+    // 4. FETCH HEALTH, TOPOLOGY, GUARDRAILS & PERSONAS
     fetch('/health')
       .then(r => r.json())
       .then(d => {
-        modelTag.textContent = 'Model: ' + (d.model || 'GGUF');
+        serverMetadata = d;
+
+        // Model name
+        const activeModel = d.model || 'GGUF';
+        populateModelOption(activeModel, true);
+
+        // Topology / Cluster info
+        if (d.cluster) {
+          const c = d.cluster;
+          const topoIcon = document.getElementById('topology-icon');
+          const topoName = document.getElementById('topology-name');
+          const topoSub = document.getElementById('topology-sub');
+          const topoBadge = document.getElementById('topology-badge');
+          const topoMode = document.getElementById('topo-mode');
+          const topoRole = document.getElementById('topo-role');
+          const topoPeers = document.getElementById('topo-peers');
+
+          topoMode.textContent = c.mode === 'cluster' ? 'Cluster Active' : 'Standalone';
+          topoRole.textContent = c.role || 'Single Node';
+
+          const activeBackend = c.backend || d.backend;
+          if (activeBackend) {
+            document.getElementById('topo-backend').textContent = activeBackend;
+          }
+
+          if (c.is_standalone) {
+            topoIcon.textContent = '🟢';
+            topoName.textContent = 'Standalone Node';
+            topoSub.textContent = 'Single Node · Local Engine';
+            topoBadge.textContent = 'Local';
+            topoPeers.textContent = '0 (Local Only)';
+          } else {
+            topoIcon.textContent = '🌐';
+            topoName.textContent = 'Cluster Connected';
+            topoSub.textContent = `${c.connected_count || 1} Nodes Active`;
+            topoBadge.textContent = `${c.dist_mode || 'Distributed'}`;
+            topoPeers.textContent = (c.peers && c.peers.length > 0) ? c.peers.join(', ') : 'Cluster Stage';
+          }
+        }
+
+        // Asimov Guardrails
+        if (d.guardrails !== undefined) {
+          setGuardrailsState(!!d.guardrails);
+        }
+
+        // Constitution Rules
+        if (d.constitution && Array.isArray(d.constitution)) {
+          const lawsList = document.getElementById('laws-list');
+          lawsList.innerHTML = '';
+          d.constitution.forEach((rule, idx) => {
+            const item = document.createElement('div');
+            item.className = 'law-item';
+            item.innerHTML = `
+              <span class="law-num">Rule ${idx + 1}</span>
+              <p class="law-text">${escapeHTML(rule)}</p>
+            `;
+            lawsList.appendChild(item);
+          });
+          document.getElementById('laws-toggle-title').textContent = `📜 Constitution (${d.constitution.length} Rules)`;
+        }
+        if (d.guardrails_rules_path) {
+          document.getElementById('rules-source-badge').textContent = `Loaded from: ${d.guardrails_rules_path}`;
+        }
+
+        // Personas
+        if (d.personas && Array.isArray(d.personas)) {
+          populatePersonas(d.personas);
+        }
       }).catch(() => {
-        modelTag.textContent = 'Model: go-infer';
+        populateModelOption('go-infer', true);
       });
 
+    // 5. FETCH MODELS FROM /api/tags (#2 Enhancement: Model Switcher)
+    fetch('/api/tags')
+      .then(r => r.json())
+      .then(d => {
+        if (d.models && Array.isArray(d.models)) {
+          d.models.forEach(m => populateModelOption(m.name, m.active));
+        }
+      }).catch(() => {});
+
+    function populateModelOption(modelName, isActive) {
+      if (!modelName) return;
+      let existing = Array.from(modelSelect.options).find(o => o.value === modelName);
+      if (!existing) {
+        const opt = document.createElement('option');
+        opt.value = modelName;
+        opt.textContent = modelName;
+        modelSelect.appendChild(opt);
+        existing = opt;
+      }
+      if (isActive || modelSelect.options.length === 1) {
+        modelSelect.value = modelName;
+      }
+    }
+
+    // Populate Personas dropdown
+    function populatePersonas(personas) {
+      if (!personas || personas.length === 0) return;
+      personaSelect.innerHTML = '';
+      loadedPersonasMap = {};
+      personas.forEach((p, idx) => {
+        loadedPersonasMap[p.id] = p;
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name + (p.description ? ` (${p.description})` : '');
+        personaSelect.appendChild(opt);
+        if (idx === 0 && !sysPrompt.value) {
+          sysPrompt.value = p.system_prompt || '';
+        }
+      });
+    }
+
+    // 6. ENHANCEMENT #3: DOCUMENT UPLOAD & ATTACHMENT
+    const attachBtn = document.getElementById('attach-btn');
+    const docFileInput = document.getElementById('doc-file-input');
+    const attachmentChips = document.getElementById('attachment-chips');
+    const chatMainArea = document.getElementById('chat-main-area');
+    let attachedFiles = [];
+
+    attachBtn.onclick = () => docFileInput.click();
+
+    docFileInput.onchange = (e) => {
+      handleFiles(e.target.files);
+      docFileInput.value = '';
+    };
+
+    // Drag-and-drop support
+    chatMainArea.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      formEl.classList.add('drag-over');
+    });
+    chatMainArea.addEventListener('dragleave', () => {
+      formEl.classList.remove('drag-over');
+    });
+    chatMainArea.addEventListener('drop', (e) => {
+      e.preventDefault();
+      formEl.classList.remove('drag-over');
+      if (e.dataTransfer && e.dataTransfer.files) {
+        handleFiles(e.dataTransfer.files);
+      }
+    });
+
+    function handleFiles(files) {
+      if (!files || files.length === 0) return;
+      Array.from(files).forEach(file => {
+        if (file.size > 2 * 1024 * 1024) {
+          alert(`File "${file.name}" exceeds 2MB limit.`);
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          attachedFiles.push({
+            name: file.name,
+            size: (file.size / 1024).toFixed(1) + ' KB',
+            content: evt.target.result
+          });
+          renderAttachmentChips();
+        };
+        reader.readAsText(file);
+      });
+    }
+
+    function renderAttachmentChips() {
+      if (attachedFiles.length === 0) {
+        attachmentChips.style.display = 'none';
+        attachmentChips.innerHTML = '';
+        return;
+      }
+      attachmentChips.style.display = 'flex';
+      attachmentChips.innerHTML = '';
+      attachedFiles.forEach((f, idx) => {
+        const chip = document.createElement('div');
+        chip.className = 'attach-chip';
+        chip.innerHTML = `
+          <span>📄</span>
+          <span>${escapeHTML(f.name)} (${f.size})</span>
+          <span class="attach-chip-remove" onclick="removeAttachment(${idx})">✕</span>
+        `;
+        attachmentChips.appendChild(chip);
+      });
+    }
+
+    window.removeAttachment = function(idx) {
+      attachedFiles.splice(idx, 1);
+      renderAttachmentChips();
+    };
+
+    // 7. ENHANCEMENT #5: VOICE INPUT (Web Speech API)
+    const micBtn = document.getElementById('mic-btn');
+    let recognition = null;
+    let isListening = false;
+
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition = new SpeechRec();
+      recognition.continuous = false;
+      recognition.interimResults = true;
+
+      recognition.onstart = () => {
+        isListening = true;
+        micBtn.classList.add('listening');
+        micBtn.title = 'Listening... click to stop';
+      };
+
+      recognition.onresult = (evt) => {
+        let transcript = '';
+        for (let i = evt.resultIndex; i < evt.results.length; ++i) {
+          transcript += evt.results[i][0].transcript;
+        }
+        inputEl.value = transcript;
+      };
+
+      recognition.onerror = (e) => {
+        console.warn('Speech recognition error:', e);
+        stopListening();
+      };
+
+      recognition.onend = () => {
+        stopListening();
+      };
+    }
+
+    function stopListening() {
+      isListening = false;
+      micBtn.classList.remove('listening');
+      micBtn.title = 'Voice Input (Speech-to-Text)';
+    }
+
+    micBtn.onclick = () => {
+      if (!recognition) {
+        alert('Voice input is not supported in this browser. Please use Chrome, Safari, or Edge.');
+        return;
+      }
+      if (isListening) {
+        recognition.stop();
+        stopListening();
+      } else {
+        recognition.start();
+      }
+    };
+
+    // 8. ENHANCEMENT #4: TELEMETRY & SAMPLER INSPECTOR MODAL
+    const inspectorModal = document.getElementById('inspector-modal');
+    const btnInspector = document.getElementById('btn-inspector');
+    const btnCloseInspector = document.getElementById('btn-close-inspector');
+    const telemetryPill = document.getElementById('telemetry-pill');
+
+    function openInspector() {
+      document.getElementById('modal-stat-tps').textContent = latestRunStats.tps + ' tok/s';
+      document.getElementById('modal-stat-ttft').textContent = latestRunStats.ttft + ' ms';
+      document.getElementById('modal-stat-tokens').textContent = latestRunStats.count + ' tokens';
+      document.getElementById('modal-stat-duration').textContent = latestRunStats.duration + ' s';
+      document.getElementById('modal-stat-model').textContent = modelSelect.value || serverMetadata.model || 'GGUF';
+      document.getElementById('modal-stat-arch').textContent = serverMetadata.arch || 'Transformer';
+      document.getElementById('modal-stat-layers').textContent = serverMetadata.layers ? `${serverMetadata.layers} Layers` : 'Auto';
+      document.getElementById('modal-stat-seqlen').textContent = serverMetadata.seq_len ? `${serverMetadata.seq_len} tokens` : 'Default';
+      document.getElementById('modal-stat-temp-topp').textContent = `${parseFloat(tempSlider.value).toFixed(2)} / ${parseFloat(toppSlider.value).toFixed(2)} / ${parseFloat(reppenSlider.value).toFixed(2)}`;
+      document.getElementById('modal-stat-backend').textContent = serverMetadata.backend || 'Apple Metal GPU';
+      inspectorModal.style.display = 'flex';
+    }
+
+    function closeInspector() {
+      inspectorModal.style.display = 'none';
+    }
+
+    telemetryPill.onclick = openInspector;
+    btnInspector.onclick = openInspector;
+    btnCloseInspector.onclick = closeInspector;
+    inspectorModal.onclick = (e) => {
+      if (e.target === inspectorModal) closeInspector();
+    };
+
+    // Clear Chat
+    document.getElementById('btn-clear-chat').onclick = () => {
+      if (confirm('Clear entire conversation history?')) {
+        conversation = [];
+        messagesEl.innerHTML = '';
+        hudTps.textContent = '⚡ Ready';
+        hudStats.textContent = '0 tokens';
+        attachedFiles = [];
+        renderAttachmentChips();
+      }
+    };
+
+    // Export Chat as Markdown
+    document.getElementById('btn-export-chat').onclick = () => {
+      if (conversation.length === 0) {
+        alert('No messages to export.');
+        return;
+      }
+      let md = '# Chat Session with go-infer\n\n';
+      conversation.forEach(msg => {
+        md += `### ${msg.role === 'user' ? 'User' : 'Assistant'}\n\n${msg.content}\n\n---\n\n`;
+      });
+      const blob = new Blob([md], { type: 'text/markdown' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `chat-export-${new Date().toISOString().slice(0, 10)}.md`;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+
+    // 9. FORM SUBMIT & STREAMING LOOP
     formEl.onsubmit = async (e) => {
       e.preventDefault();
+
+      if (currentAbortController) {
+        currentAbortController.abort();
+        return;
+      }
+
       const text = inputEl.value.trim();
-      if (!text) return;
+      if (!text && attachedFiles.length === 0) return;
 
       inputEl.value = '';
-      inputEl.disabled = true;
-      sendBtn.disabled = true;
 
-      // Add user message
-      conversation.push({ role: 'user', content: text });
-      appendMessage('user', text);
+      // Prepare attached context
+      let promptContent = text;
+      let displayDocBadges = [];
+      if (attachedFiles.length > 0) {
+        let docsContext = '';
+        attachedFiles.forEach(f => {
+          docsContext += `\n[Attached File: ${f.name}]\n\`\`\`\n${f.content}\n\`\`\`\n`;
+          displayDocBadges.push(f.name);
+        });
+        promptContent = docsContext + (text ? '\nUser Query: ' + text : '');
+        attachedFiles = [];
+        renderAttachmentChips();
+      }
 
-      // Create bot placeholder
-      const botBubble = appendMessage('assistant', '');
+      // Add user message to UI and history
+      conversation.push({ role: 'user', content: promptContent });
+      appendMessage('user', text || '[Attached Documents]', displayDocBadges);
+
+      // Create assistant placeholder
+      const { bubble, metaEl } = appendAssistantContainer();
 
       const payload = {
-        model: 'default',
+        model: modelSelect.value || 'default',
         messages: [
-          ...(document.getElementById('sys-prompt').value ? [{ role: 'system', content: document.getElementById('sys-prompt').value }] : []),
+          ...(sysPrompt.value ? [{ role: 'system', content: sysPrompt.value }] : []),
           ...conversation
         ],
         stream: true,
         temperature: parseFloat(tempSlider.value),
         top_p: parseFloat(toppSlider.value),
-        max_tokens: parseInt(maxtokSlider.value)
+        repetition_penalty: parseFloat(reppenSlider.value),
+        max_tokens: parseInt(maxtokSlider.value),
+        enable_guardrails: isGuardrailsActive
       };
 
       const headers = { 'Content-Type': 'application/json' };
@@ -364,59 +1681,328 @@
         headers['Authorization'] = 'Bearer ' + currentKey;
       }
 
+      currentAbortController = new AbortController();
+      sendBtn.classList.add('stop-btn');
+      sendBtnIcon.textContent = 'Stop';
+
+      let fullReply = '';
+      let isThinking = false;
+      let startTime = performance.now();
+      let firstTokenTime = null;
+      let tokenCount = 0;
+
       try {
         const res = await fetch('/v1/chat/completions', {
           method: 'POST',
           headers: headers,
-          body: JSON.stringify(payload)
+          body: JSON.stringify(payload),
+          signal: currentAbortController.signal
         });
 
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder('utf-8');
-        let fullReply = '';
+        if (!res.ok) {
+          const errText = await res.text();
+          if (errText.includes('Guardrail blocked')) {
+            bubble.innerHTML = `
+              <div class="guardrail-alert">
+                <div class="guardrail-alert-title">🛡️ Asimov Guardrail Blocked</div>
+                <div>${escapeHTML(errText)}</div>
+              </div>
+            `;
+            metaEl.innerHTML = '<span style="color:var(--danger-text)">⚠️ Request intercepted by Layer 1 safety boundary</span>';
+            return;
+          }
+          throw new Error(errText || `HTTP ${res.status}`);
+        }
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value);
-          const lines = chunk.split('\n');
-          for (const line of lines) {
-            if (line.startsWith('data: ') && !line.includes('[DONE]')) {
-              try {
-                const parsed = JSON.parse(line.slice(6));
-                const delta = parsed.choices[0].delta?.content || '';
-                fullReply += delta;
-                botBubble.textContent = fullReply;
-                messagesEl.scrollTop = messagesEl.scrollHeight;
-              } catch (_) {}
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const parsed = await res.json();
+          const choice = parsed.choices?.[0];
+          const text = choice?.message?.content || parsed.response || parsed.output || '';
+          const reasoning = choice?.message?.reasoning_content || '';
+          if (reasoning) {
+            fullReply = `<think>${reasoning}</think>\n\n` + text;
+          } else {
+            fullReply = text;
+          }
+          tokenCount = parsed.usage?.completion_tokens || (fullReply ? Math.max(1, Math.round(fullReply.trim().split(/\s+/).length * 1.3)) : 0);
+          renderMessageContent(bubble, fullReply || '[Empty response received]');
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        } else {
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder('utf-8');
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = decoder.decode(value);
+            const lines = chunk.split('\n');
+            for (const line of lines) {
+              let jsonStr = null;
+              if (line.startsWith('data: ') && !line.includes('[DONE]')) {
+                jsonStr = line.slice(6).trim();
+              } else if (line.trim().startsWith('{') && line.trim().endsWith('}')) {
+                jsonStr = line.trim();
+              }
+              if (jsonStr) {
+                try {
+                  const parsed = JSON.parse(jsonStr);
+                  const choice = parsed.choices?.[0];
+                  if (!choice) continue;
+
+                  if (choice.delta) {
+                    const d = choice.delta;
+                    const reasoning = d.reasoning_content;
+                    const content = d.content;
+
+                    let updated = false;
+
+                    if (reasoning !== undefined && reasoning !== null && reasoning !== '') {
+                      if (!firstTokenTime) firstTokenTime = performance.now();
+                      tokenCount++;
+                      updated = true;
+                      if (!isThinking) {
+                        isThinking = true;
+                        fullReply += '<think>' + reasoning;
+                      } else {
+                        fullReply += reasoning;
+                      }
+                    }
+
+                    if (content !== undefined && content !== null && content !== '') {
+                      if (!firstTokenTime) firstTokenTime = performance.now();
+                      tokenCount++;
+                      updated = true;
+                      if (isThinking) {
+                        isThinking = false;
+                        fullReply += '</think>\n\n' + content;
+                      } else {
+                        fullReply += content;
+                      }
+                    }
+
+                    if (updated) {
+                      renderMessageContent(bubble, fullReply);
+                      messagesEl.scrollTop = messagesEl.scrollHeight;
+
+                      const elapsedSec = (performance.now() - (firstTokenTime || startTime)) / 1000;
+                      const tps = elapsedSec > 0 ? (tokenCount / elapsedSec).toFixed(1) : '0.0';
+                      hudTps.textContent = `⚡ ${tps} tok/s`;
+                      hudStats.textContent = `${tokenCount} tokens`;
+
+                      latestRunStats.tps = tps;
+                      latestRunStats.count = tokenCount;
+                    }
+                  } else if (choice.message) {
+                    const content = choice.message.content;
+                    if (content) {
+                      if (!firstTokenTime) firstTokenTime = performance.now();
+                      fullReply = content;
+                      tokenCount = parsed.usage?.completion_tokens || Math.max(1, Math.round(content.trim().split(/\s+/).length * 1.3));
+                      renderMessageContent(bubble, fullReply);
+                      messagesEl.scrollTop = messagesEl.scrollHeight;
+                    }
+                  }
+                } catch (_) {}
+              }
             }
           }
+
+          if (isThinking) {
+            isThinking = false;
+            fullReply += '</think>';
+            renderMessageContent(bubble, fullReply);
+          }
         }
+
+        if (!fullReply) {
+          bubble.innerHTML = '<span style="color:var(--text-muted)">[No response generated by model]</span>';
+        }
+
         conversation.push({ role: 'assistant', content: fullReply });
+
+        const totalDuration = ((performance.now() - startTime) / 1000).toFixed(2);
+        const ttft = firstTokenTime ? Math.round(firstTokenTime - startTime) : (tokenCount > 0 ? Math.round(parseFloat(totalDuration) * 100) : 0);
+        latestRunStats.ttft = ttft;
+        latestRunStats.duration = totalDuration;
+
+        if (isGuardrailsActive) {
+          metaEl.innerHTML = `
+            <span class="meta-guardrail">🛡️ Asimov Verified</span>
+            <span>·</span>
+            <span>${tokenCount} tokens in ${totalDuration}s</span>
+            <span>·</span>
+            <span>TTFT: ${ttft}ms</span>
+          `;
+        } else {
+          metaEl.innerHTML = `
+            <span style="color:var(--text-dim)">⚡ Standard</span>
+            <span>·</span>
+            <span>${tokenCount} tokens in ${totalDuration}s</span>
+            <span>·</span>
+            <span>TTFT: ${ttft}ms</span>
+          `;
+        }
       } catch (err) {
-        botBubble.textContent = 'Error communicating with go-infer server: ' + err.message;
+        if (err.name === 'AbortError') {
+          if (isThinking) {
+            isThinking = false;
+            fullReply += '</think>';
+            renderMessageContent(bubble, fullReply);
+          }
+          metaEl.innerHTML = '<span style="color:var(--text-muted)">[Generation halted by user]</span>';
+        } else {
+          bubble.innerHTML = `<span style="color:var(--danger-text)">Error: ${escapeHTML(err.message)}</span>`;
+        }
       } finally {
-        inputEl.disabled = false;
-        sendBtn.disabled = false;
+        currentAbortController = null;
+        sendBtn.classList.remove('stop-btn');
+        sendBtnIcon.textContent = 'Send';
         inputEl.focus();
       }
     };
 
-    function appendMessage(role, text) {
+    function appendMessage(role, text, docBadges = []) {
       const msg = document.createElement('div');
       msg.className = 'message ' + role;
       const avatar = document.createElement('div');
       avatar.className = 'avatar';
       avatar.textContent = role === 'user' ? 'U' : '⚡';
+      const wrapper = document.createElement('div');
+      wrapper.className = 'bubble-wrapper';
+
+      if (docBadges.length > 0) {
+        docBadges.forEach(name => {
+          const badge = document.createElement('span');
+          badge.className = 'attached-docs-badge';
+          badge.textContent = `📄 ${name}`;
+          wrapper.appendChild(badge);
+        });
+      }
+
       const bubble = document.createElement('div');
       bubble.className = 'bubble';
       bubble.textContent = text;
+      wrapper.appendChild(bubble);
       msg.appendChild(avatar);
-      msg.appendChild(bubble);
+      msg.appendChild(wrapper);
       messagesEl.appendChild(msg);
       messagesEl.scrollTop = messagesEl.scrollHeight;
       return bubble;
     }
+
+    function appendAssistantContainer() {
+      const msg = document.createElement('div');
+      msg.className = 'message assistant';
+      const avatar = document.createElement('div');
+      avatar.className = 'avatar';
+      avatar.textContent = '⚡';
+      const wrapper = document.createElement('div');
+      wrapper.className = 'bubble-wrapper';
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      const meta = document.createElement('div');
+      meta.className = 'message-meta';
+      meta.innerHTML = isGuardrailsActive
+        ? '<span class="meta-guardrail">🛡️ Processing under Asimov Safety Shield...</span>'
+        : '<span style="color:var(--text-dim)">⚡ Processing request...</span>';
+      wrapper.appendChild(bubble);
+      wrapper.appendChild(meta);
+      msg.appendChild(avatar);
+      msg.appendChild(wrapper);
+      messagesEl.appendChild(msg);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return { bubble, metaEl: meta };
+    }
+
+    // Markdown, Reasoning <think>, and Code Block Formatter
+    function renderMessageContent(container, rawText) {
+      let html = '';
+      let remaining = rawText;
+
+      // Handle <think> reasoning accordion
+      if (remaining.includes('<think>')) {
+        const start = remaining.indexOf('<think>') + 7;
+        const end = remaining.indexOf('</think>');
+        if (end !== -1) {
+          const thinkText = remaining.substring(start, end).trim();
+          remaining = remaining.substring(end + 8).trim();
+          html += `
+            <details class="think-accordion" open>
+              <summary class="think-summary">
+                <span>🧠</span> Reasoning Process · <span style="color:#3fb950">✓ Complete</span>
+              </summary>
+              <div class="think-body">${escapeHTML(thinkText)}</div>
+            </details>
+          `;
+        } else {
+          const thinkText = remaining.substring(start);
+          remaining = '';
+          html += `
+            <details class="think-accordion" open>
+              <summary class="think-summary">
+                <span>🧠</span> Reasoning Process · <span style="color:var(--accent)">Thinking...</span>
+              </summary>
+              <div class="think-body">${escapeHTML(thinkText)}</div>
+            </details>
+          `;
+        }
+      }
+
+      // Format markdown code blocks
+      const codeRegex = /```([a-zA-Z0-9_\-#+]*)\n([\s\S]*?)```/g;
+      let lastIndex = 0;
+      let match;
+
+      while ((match = codeRegex.exec(remaining)) !== null) {
+        const textBefore = remaining.substring(lastIndex, match.index);
+        html += formatInlineText(textBefore);
+        const lang = match[1] || 'code';
+        const code = match[2];
+        html += `
+          <div class="code-container">
+            <div class="code-header">
+              <span>${escapeHTML(lang)}</span>
+              <button type="button" class="copy-code-btn" onclick="copyCode(this)">Copy</button>
+            </div>
+            <pre class="code-body"><code>${escapeHTML(code)}</code></pre>
+          </div>
+        `;
+        lastIndex = match.index + match[0].length;
+      }
+      html += formatInlineText(remaining.substring(lastIndex));
+
+      container.innerHTML = html;
+    }
+
+    function formatInlineText(text) {
+      if (!text) return '';
+      let escaped = escapeHTML(text);
+      // bold
+      escaped = escaped.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+      // inline code
+      escaped = escaped.replace(/`([^`]+)`/g, '<code style="background:rgba(128,128,128,0.15);padding:2px 5px;border-radius:4px;font-family:\'JetBrains Mono\',monospace;font-size:12.5px;">$1</code>');
+      return escaped;
+    }
+
+    function escapeHTML(str) {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    window.copyCode = function(btn) {
+      const codeEl = btn.closest('.code-container').querySelector('code');
+      if (codeEl) {
+        navigator.clipboard.writeText(codeEl.textContent).then(() => {
+          btn.textContent = '✓ Copied!';
+          setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+        });
+      }
+    };
   </script>
 </body>
 </html>

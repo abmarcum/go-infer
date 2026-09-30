@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20|%20Linux%20|%20Windows%20|%20iOS-blue)](README.md)
 [![Dependencies](https://img.shields.io/badge/Dependencies-Zero%20External-brightgreen)](go.mod)
-[![AI Generated: Gemini](https://img.shields.io/badge/Gemini-blue)](https://gemini.google.com/)
+[![AI Generated](https://img.shields.io/badge/AI%20Generated|Gemini-blue)](https://gemini.google.com/)
 
 </div>
 

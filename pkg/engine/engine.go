@@ -23,13 +23,17 @@ type Engine struct {
 	GEMV               *math.GEMVEngine
 	Arena              *MemoryArena
 	Weights            *Weights
-	MetalLayers        []metal.LayerWeights
-	PreallocatedLayers *metal.PreallocatedLayers
-	OutNormBuf         unsafe.Pointer
-	OutWeightBuf       unsafe.Pointer
-	OutWeightTyp       int
-	PrefixCache        *PrefixCache
-	mu                 sync.Mutex
+	MetalLayers              []metal.LayerWeights
+	PreallocatedLayers       *metal.PreallocatedLayers
+	MetalQwen35Layers        []metal.Qwen35LayerWeights
+	PreallocatedQwen35Layers *metal.PreallocatedQwen35Layers
+	OutNormBuf               unsafe.Pointer
+	OutWeightBuf             unsafe.Pointer
+	OutWeightTyp             int
+	TokenEmbdBuf             unsafe.Pointer
+	TokenEmbdTyp             int
+	PrefixCache              *PrefixCache
+	mu                       sync.Mutex
 }
 
 // ChatMessage represents a single message in a multi-turn chat.
@@ -70,9 +74,9 @@ func LoadModel(filePath string, numThreads int) (*Engine, error) {
 	arch := gguf.GetMetadataString(meta, "general.architecture", "llama")
 
 	// Detect unsupported State Space Model (SSM / Mamba hybrid) architectures
-	if arch == "qwen35" || arch == "mamba" || arch == "rwkv" {
+	if arch == "mamba" || arch == "rwkv" {
 		reader.Close()
-		return nil, fmt.Errorf("architecture '%s' is a State Space Model (Mamba/SSM hybrid) which uses recurrent state-space layers rather than standard Transformer attention. go-infer accelerates dense Transformer architectures (LLaMA 3/3.1/3.2, Qwen 2/2.5, DeepSeek-R1, Mistral, Gemma, Phi). For Qwen, please use dense Transformer models such as qwen2.5:14b, qwen2.5:32b, or deepseek-r1-distill-qwen", arch)
+		return nil, fmt.Errorf("architecture '%s' is an unsupported recurrent architecture. go-infer supports dense Transformers and Qwen 3.5 hybrid SSM", arch)
 	}
 
 	// Extract Hyperparameters dynamically based on architecture prefix
@@ -99,14 +103,25 @@ func LoadModel(filePath string, numThreads int) (*Engine, error) {
 	dim := int(getParamUint("embedding_length", 2048))
 	hiddenDim := int(getParamUint("feed_forward_length", 5632))
 	numLayers := int(getParamUint("block_count", 16))
+	if nextn := int(getParamUint("nextn_predict_layers", 0)); nextn > 0 && numLayers > nextn {
+		numLayers -= nextn
+	}
 	numHeads := int(getParamUint("attention.head_count", 32))
 	numKVHeads := int(getParamUint("attention.head_count_kv", uint64(numHeads)))
 	seqLen := int(getParamUint("context_length", 2048))
 	ropeTheta := float32(getParamFloat("rope.freq_base", 500000.0))
+	ropeDim := int(getParamUint("rope.dimension_count", 0))
 	eps := float32(getParamFloat("attention.layer_norm_rms_epsilon", 1e-5))
 	if eps == 0 {
 		eps = float32(getParamFloat("attention.layer_norm_epsilon", 1e-5))
 	}
+
+	fullAttnInterval := int(getParamUint("full_attention_interval", 4))
+	ssmInnerSize := int(getParamUint("ssm.inner_size", 6144))
+	ssmConvKernel := int(getParamUint("ssm.conv_kernel", 4))
+	ssmStateSize := int(getParamUint("ssm.state_size", 128))
+	ssmGroupCount := int(getParamUint("ssm.group_count", 16))
+	ssmTimeStepRank := int(getParamUint("ssm.time_step_rank", 48))
 
 	vocabSize := len(vocab)
 	if vocabSize == 0 {
@@ -127,25 +142,46 @@ func LoadModel(filePath string, numThreads int) (*Engine, error) {
 	}
 
 	cfg := ModelConfig{
-		Dim:        dim,
-		HiddenDim:  hiddenDim,
-		NumLayers:  numLayers,
-		NumHeads:   numHeads,
-		NumKVHeads: numKVHeads,
-		VocabSize:  vocabSize,
-		SeqLen:     activeSeqLen,
-		RopeTheta:  ropeTheta,
-		Eps:        eps,
-		BosID:      bosID,
-		EosID:      eosID,
-		EotID:      tok.EotTokenID,
-		AddBOS:     addBOS,
+		Architecture:          arch,
+		Dim:                   dim,
+		HiddenDim:             hiddenDim,
+		NumLayers:             numLayers,
+		NumHeads:              numHeads,
+		NumKVHeads:            numKVHeads,
+		VocabSize:             vocabSize,
+		SeqLen:                activeSeqLen,
+		RopeTheta:             ropeTheta,
+		RopeDim:               ropeDim,
+		Eps:                   eps,
+		BosID:                 bosID,
+		EosID:                 eosID,
+		EotID:                 tok.EotTokenID,
+		AddBOS:                addBOS,
+		FullAttentionInterval: fullAttnInterval,
+		SSMInnerSize:          ssmInnerSize,
+		SSMConvKernel:         ssmConvKernel,
+		SSMStateSize:          ssmStateSize,
+		SSMGroupCount:         ssmGroupCount,
+		SSMTimeStepRank:       ssmTimeStepRank,
 	}
 
 	// Try initializing Apple Metal GPU on macOS
 	_ = metal.Init()
 	if metal.IsAvailable() {
-		_ = metal.AllocBuffers(cfg.Dim, cfg.HiddenDim, cfg.KVDim(), cfg.VocabSize, cfg.NumLayers, cfg.SeqLen)
+		if cfg.Architecture == "qwen35" {
+			ssmChannels := cfg.SSMInnerSize + 2*cfg.SSMGroupCount*cfg.SSMStateSize
+			_ = metal.AllocQwen35Buffers(
+				cfg.Dim, cfg.HiddenDim, cfg.SSMInnerSize, ssmChannels,
+				cfg.SSMTimeStepRank, cfg.SSMStateSize, cfg.KVDim(), cfg.VocabSize,
+				cfg.NumLayers, cfg.SeqLen,
+			)
+		} else {
+			allocDim := cfg.Dim
+			if cfg.AttnDim() > allocDim {
+				allocDim = cfg.AttnDim()
+			}
+			_ = metal.AllocBuffers(allocDim, cfg.HiddenDim, cfg.KVDim(), cfg.VocabSize, cfg.NumLayers, cfg.SeqLen)
+		}
 	}
 
 	weights, err := NewWeights(reader)
@@ -154,81 +190,170 @@ func LoadModel(filePath string, numThreads int) (*Engine, error) {
 		return nil, fmt.Errorf("load weights: %w", err)
 	}
 
-	if _, ok := weights.ResolveTensorName("blk.0.attn_q.weight"); !ok {
-		weights.Close()
-		reader.Close()
-		return nil, fmt.Errorf("model is missing standard attention projection weights ('blk.0.attn_q.weight'); architecture '%s' is not supported", arch)
+	if arch != "qwen35" {
+		if _, ok := weights.ResolveTensorName("blk.0.attn_q.weight"); !ok {
+			weights.Close()
+			reader.Close()
+			return nil, fmt.Errorf("model is missing standard attention projection weights ('blk.0.attn_q.weight'); architecture '%s' is not supported", arch)
+		}
+	} else {
+		if _, ok := weights.ResolveTensorName("blk.0.attn_qkv.weight"); !ok {
+			weights.Close()
+			reader.Close()
+			return nil, fmt.Errorf("qwen35 model is missing SSM projection weights ('blk.0.attn_qkv.weight')")
+		}
 	}
 
 	arena := NewMemoryArena(cfg)
 	gemv := math.NewGEMVEngine(numThreads)
 
 	var metalLayers []metal.LayerWeights
+	var qwen35Layers []metal.Qwen35LayerWeights
+	var preallocatedQwen35Layers *metal.PreallocatedQwen35Layers
 	var outNormBuf, outWeightBuf unsafe.Pointer
 	var outWeightTyp int
+	var tokenEmbdBuf unsafe.Pointer
+	var tokenEmbdTyp int
 
 	if metal.IsAvailable() {
-		metalLayers = make([]metal.LayerWeights, numLayers)
-		for l := 0; l < numLayers; l++ {
-			wqName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_q.weight", l))
-			wkName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_k.weight", l))
-			wvName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_v.weight", l))
-			woName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_output.weight", l))
-			gateName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ffn_gate.weight", l))
-			upName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ffn_up.weight", l))
-			downName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ffn_down.weight", l))
-			attnNormName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_norm.weight", l))
-			ffnNormName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ffn_norm.weight", l))
-
-			bqName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_q.bias", l))
-			bkName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_k.bias", l))
-			bvName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_v.bias", l))
-
-			metalLayers[l] = metal.LayerWeights{
-				WQBuf:       weights.GPUBufs[wqName],
-				WQType:      int(weights.Meta[wqName].Type),
-				WKBuf:       weights.GPUBufs[wkName],
-				WKType:      int(weights.Meta[wkName].Type),
-				WVBuf:       weights.GPUBufs[wvName],
-				WVType:      int(weights.Meta[wvName].Type),
-				WOBuf:       weights.GPUBufs[woName],
-				WOType:      int(weights.Meta[woName].Type),
-				FFNGateBuf:  weights.GPUBufs[gateName],
-				FFNGateType: int(weights.Meta[gateName].Type),
-				FFNUpBuf:    weights.GPUBufs[upName],
-				FFNUpType:   int(weights.Meta[upName].Type),
-				FFNDownBuf:  weights.GPUBufs[downName],
-				FFNDownType: int(weights.Meta[downName].Type),
-				AttnNormBuf: weights.GPUBufs[attnNormName],
-				FFNNormBuf:  weights.GPUBufs[ffnNormName],
-				BQBuf:       weights.GPUBufs[bqName],
-				BKBuf:       weights.GPUBufs[bkName],
-				BVBuf:       weights.GPUBufs[bvName],
-			}
-		}
-
 		outNormName, _ := weights.ResolveTensorName("output_norm.weight")
 		outWeightName, _ := weights.ResolveTensorName("output.weight")
+		tokenEmbdName, _ := weights.ResolveTensorName("token_embd.weight")
 		outNormBuf = weights.GPUBufs[outNormName]
 		outWeightBuf = weights.GPUBufs[outWeightName]
 		outWeightTyp = int(weights.Meta[outWeightName].Type)
+		tokenEmbdBuf = weights.GPUBufs[tokenEmbdName]
+		if meta, ok := weights.Meta[tokenEmbdName]; ok {
+			tokenEmbdTyp = int(meta.Type)
+		}
+
+		if arch != "qwen35" {
+			metalLayers = make([]metal.LayerWeights, numLayers)
+			for l := 0; l < numLayers; l++ {
+				wqName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_q.weight", l))
+				wkName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_k.weight", l))
+				wvName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_v.weight", l))
+				woName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_output.weight", l))
+				gateName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ffn_gate.weight", l))
+				upName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ffn_up.weight", l))
+				downName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ffn_down.weight", l))
+				attnNormName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_norm.weight", l))
+				ffnNormName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ffn_norm.weight", l))
+
+				bqName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_q.bias", l))
+				bkName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_k.bias", l))
+				bvName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_v.bias", l))
+
+				metalLayers[l] = metal.LayerWeights{
+					WQBuf:       weights.GPUBufs[wqName],
+					WQType:      int(weights.Meta[wqName].Type),
+					WKBuf:       weights.GPUBufs[wkName],
+					WKType:      int(weights.Meta[wkName].Type),
+					WVBuf:       weights.GPUBufs[wvName],
+					WVType:      int(weights.Meta[wvName].Type),
+					WOBuf:       weights.GPUBufs[woName],
+					WOType:      int(weights.Meta[woName].Type),
+					FFNGateBuf:  weights.GPUBufs[gateName],
+					FFNGateType: int(weights.Meta[gateName].Type),
+					FFNUpBuf:    weights.GPUBufs[upName],
+					FFNUpType:   int(weights.Meta[upName].Type),
+					FFNDownBuf:  weights.GPUBufs[downName],
+					FFNDownType: int(weights.Meta[downName].Type),
+					AttnNormBuf: weights.GPUBufs[attnNormName],
+					FFNNormBuf:  weights.GPUBufs[ffnNormName],
+					BQBuf:       weights.GPUBufs[bqName],
+					BKBuf:       weights.GPUBufs[bkName],
+					BVBuf:       weights.GPUBufs[bvName],
+				}
+			}
+		} else {
+			qwen35Layers = make([]metal.Qwen35LayerWeights, numLayers)
+			for l := 0; l < numLayers; l++ {
+				attnNormName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_norm.weight", l))
+				ffnNormName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.post_attention_norm.weight", l))
+				gateName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ffn_gate.weight", l))
+				upName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ffn_up.weight", l))
+				downName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ffn_down.weight", l))
+
+				isSSM := cfg.IsSSMLayer(l)
+				qwen35Layers[l].IsSSM = isSSM
+				qwen35Layers[l].AttnNormBuf = weights.GPUBufs[attnNormName]
+				qwen35Layers[l].FFNNormBuf = weights.GPUBufs[ffnNormName]
+				qwen35Layers[l].FFNGateBuf = weights.GPUBufs[gateName]
+				qwen35Layers[l].FFNGateType = int(weights.Meta[gateName].Type)
+				qwen35Layers[l].FFNUpBuf = weights.GPUBufs[upName]
+				qwen35Layers[l].FFNUpType = int(weights.Meta[upName].Type)
+				qwen35Layers[l].FFNDownBuf = weights.GPUBufs[downName]
+				qwen35Layers[l].FFNDownType = int(weights.Meta[downName].Type)
+
+				if isSSM {
+					ssmGateName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_gate.weight", l))
+					ssmQKVName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_qkv.weight", l))
+					ssmConvName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ssm_conv1d.weight", l))
+					ssmAlphaName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ssm_alpha.weight", l))
+					ssmBetaName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ssm_beta.weight", l))
+					ssmDTName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ssm_dt.bias", l))
+					ssmAName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ssm_a", l))
+					ssmNormName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ssm_norm.weight", l))
+					ssmOutName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.ssm_out.weight", l))
+
+					qwen35Layers[l].SSMGateBuf = weights.GPUBufs[ssmGateName]
+					qwen35Layers[l].SSMGateType = int(weights.Meta[ssmGateName].Type)
+					qwen35Layers[l].SSMQKVBuf = weights.GPUBufs[ssmQKVName]
+					qwen35Layers[l].SSMQKVType = int(weights.Meta[ssmQKVName].Type)
+					qwen35Layers[l].SSMConv1DBuf = weights.GPUBufs[ssmConvName]
+					qwen35Layers[l].SSMAlphaBuf = weights.GPUBufs[ssmAlphaName]
+					qwen35Layers[l].SSMAlphaType = int(weights.Meta[ssmAlphaName].Type)
+					qwen35Layers[l].SSMBetaBuf = weights.GPUBufs[ssmBetaName]
+					qwen35Layers[l].SSMBetaType = int(weights.Meta[ssmBetaName].Type)
+					qwen35Layers[l].SSMDTBiasBuf = weights.GPUBufs[ssmDTName]
+					qwen35Layers[l].SSMABuf = weights.GPUBufs[ssmAName]
+					qwen35Layers[l].SSMNormBuf = weights.GPUBufs[ssmNormName]
+					qwen35Layers[l].SSMOutBuf = weights.GPUBufs[ssmOutName]
+					qwen35Layers[l].SSMOutType = int(weights.Meta[ssmOutName].Type)
+				} else {
+					wqName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_q.weight", l))
+					wkName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_k.weight", l))
+					wvName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_v.weight", l))
+					woName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_output.weight", l))
+					qNormName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_q_norm.weight", l))
+					kNormName, _ := weights.ResolveTensorName(fmt.Sprintf("blk.%d.attn_k_norm.weight", l))
+
+					qwen35Layers[l].WQBuf = weights.GPUBufs[wqName]
+					qwen35Layers[l].WQType = int(weights.Meta[wqName].Type)
+					qwen35Layers[l].WKBuf = weights.GPUBufs[wkName]
+					qwen35Layers[l].WKType = int(weights.Meta[wkName].Type)
+					qwen35Layers[l].WVBuf = weights.GPUBufs[wvName]
+					qwen35Layers[l].WVType = int(weights.Meta[wvName].Type)
+					qwen35Layers[l].WOBuf = weights.GPUBufs[woName]
+					qwen35Layers[l].WOType = int(weights.Meta[woName].Type)
+					qwen35Layers[l].QNormBuf = weights.GPUBufs[qNormName]
+					qwen35Layers[l].KNormBuf = weights.GPUBufs[kNormName]
+				}
+			}
+			preallocatedQwen35Layers = metal.NewPreallocatedQwen35Layers(qwen35Layers)
+		}
 	}
 
 	preallocatedLayers := metal.NewPreallocatedLayers(metalLayers)
 
 	return &Engine{
-		Config:             cfg,
-		Reader:             reader,
-		Tokenizer:          tok,
-		GEMV:               gemv,
-		Arena:              arena,
-		Weights:            weights,
-		MetalLayers:        metalLayers,
-		PreallocatedLayers: preallocatedLayers,
-		OutNormBuf:         outNormBuf,
-		OutWeightBuf:       outWeightBuf,
-		OutWeightTyp:       outWeightTyp,
-		PrefixCache:        NewPrefixCache(32),
+		Config:                   cfg,
+		Reader:                   reader,
+		Tokenizer:                tok,
+		GEMV:                     gemv,
+		Arena:                    arena,
+		Weights:                  weights,
+		MetalLayers:              metalLayers,
+		PreallocatedLayers:       preallocatedLayers,
+		MetalQwen35Layers:        qwen35Layers,
+		PreallocatedQwen35Layers: preallocatedQwen35Layers,
+		OutNormBuf:               outNormBuf,
+		OutWeightBuf:             outWeightBuf,
+		OutWeightTyp:             outWeightTyp,
+		TokenEmbdBuf:             tokenEmbdBuf,
+		TokenEmbdTyp:             tokenEmbdTyp,
+		PrefixCache:              NewPrefixCache(32),
 	}, nil
 }
 
@@ -236,6 +361,11 @@ func LoadModel(filePath string, numThreads int) (*Engine, error) {
 func (e *Engine) Close() error {
 	if e.PreallocatedLayers != nil {
 		e.PreallocatedLayers.Free()
+		e.PreallocatedLayers = nil
+	}
+	if e.PreallocatedQwen35Layers != nil {
+		e.PreallocatedQwen35Layers.Free()
+		e.PreallocatedQwen35Layers = nil
 	}
 	if e.Weights != nil {
 		e.Weights.Close()
@@ -248,12 +378,22 @@ func (e *Engine) Close() error {
 
 // NewKVCache allocates a KV cache suited for this engine's model with default F32 precision.
 func (e *Engine) NewKVCache() *KVCache {
-	return NewKVCache(e.Config.NumLayers, e.Config.SeqLen, e.Config.KVDim())
+	kv := NewKVCache(e.Config.NumLayers, e.Config.SeqLen, e.Config.KVDim())
+	if e.Config.Architecture == "qwen35" {
+		ssmChannels := e.Config.SSMInnerSize + 2*e.Config.SSMGroupCount*e.Config.SSMStateSize
+		kv.InitSSM(e.Config.NumLayers, e.Config.SSMConvKernel, ssmChannels, e.Config.SSMInnerSize, e.Config.SSMStateSize)
+	}
+	return kv
 }
 
 // NewQuantizedKVCache allocates a KV cache with the specified precision type (f32, q8_0, q4_0).
 func (e *Engine) NewQuantizedKVCache(kvType KVCacheType) *KVCache {
-	return NewQuantizedKVCache(e.Config.NumLayers, e.Config.SeqLen, e.Config.KVDim(), kvType)
+	kv := NewQuantizedKVCache(e.Config.NumLayers, e.Config.SeqLen, e.Config.KVDim(), kvType)
+	if e.Config.Architecture == "qwen35" {
+		ssmChannels := e.Config.SSMInnerSize + 2*e.Config.SSMGroupCount*e.Config.SSMStateSize
+		kv.InitSSM(e.Config.NumLayers, e.Config.SSMConvKernel, ssmChannels, e.Config.SSMInnerSize, e.Config.SSMStateSize)
+	}
+	return kv
 }
 
 // GenerateStats contains timing and token statistics.
@@ -324,8 +464,9 @@ func (e *Engine) GenerateWithTools(prompt string, maxTokens int, params sampler.
 	// 2. Prefill remaining uncached prompt tokens
 	var logits []float32
 	if pos < len(tokens) {
-		if !metal.IsAvailable() && pos == 0 && len(tokens) > 1 {
-			logits = e.ForwardBatch(tokens, kv)
+		remTokens := tokens[pos:]
+		if len(remTokens) > 1 {
+			logits = e.ForwardBatchAt(remTokens, pos, kv)
 			pos = len(tokens)
 		} else {
 			for pos < len(tokens) {
@@ -350,63 +491,104 @@ func (e *Engine) GenerateWithTools(prompt string, maxTokens int, params sampler.
 	genTokens := 0
 	var recentBuffer strings.Builder
 
-	for i := 0; i < maxTokens; i++ {
-		next := sampler.SampleToken(logits, history, params)
-		genTokens++
+	isGreedy := params.Temperature <= 0.0 && params.RepPenalty <= 1.0 && params.JSONValidator == nil && params.ReasoningValidator == nil && !enableCalc
 
-		if e.isStopToken(next) {
-			break
+	var next int
+	if isGreedy && !enableCalc && maxTokens > 1 {
+		// Double-buffered asynchronous GPU pipeline for greedy decoding
+		type forwardReq struct {
+			tok int
+			pos int
+		}
+		type forwardRes struct {
+			tok int
 		}
 
-		piece := e.Tokenizer.Decode([]int{next})
-		if onToken != nil {
-			continueGen := onToken(piece)
-			if !continueGen {
+		reqChan := make(chan forwardReq, 1)
+		resChan := make(chan forwardRes, 1)
+
+		go func() {
+			for req := range reqChan {
+				nxt := e.ForwardSample(req.tok, req.pos, kv)
+				resChan <- forwardRes{tok: nxt}
+			}
+		}()
+		defer close(reqChan)
+
+		// First token sampled from prefill logits
+		next = sampler.SampleToken(logits, history, params)
+		for i := 0; i < maxTokens; i++ {
+			genTokens++
+			if e.isStopToken(next) {
 				break
 			}
+
+			// Launch asynchronous forward pass on GPU for next token while CPU decodes current token
+			hasPendingGPU := false
+			if i+1 < maxTokens {
+				reqChan <- forwardReq{tok: next, pos: pos}
+				pos++
+				hasPendingGPU = true
+			}
+
+			piece := e.Tokenizer.Decode([]int{next})
+			history = append(history, next)
+
+			continueGen := true
+			if onToken != nil {
+				continueGen = onToken(piece)
+			}
+
+			if !continueGen {
+				if hasPendingGPU {
+					<-resChan
+				}
+				break
+			}
+
+			if hasPendingGPU {
+				res := <-resChan
+				next = res.tok
+			}
 		}
+	} else {
+		for i := 0; i < maxTokens; i++ {
+			if i == 0 || !isGreedy {
+				next = sampler.SampleToken(logits, history, params)
+			}
+			genTokens++
 
-		history = append(history, next)
+			if e.isStopToken(next) {
+				break
+			}
 
-		// 3. Inline Calculator Execution if enabled
-		if enableCalc {
-			recentBuffer.WriteString(piece)
-			bufStr := recentBuffer.String()
-
-			// Check for ```calc\n...\n```
-			if (strings.Contains(bufStr, "```calc\n") || strings.Contains(bufStr, "```math\n")) && strings.HasSuffix(bufStr, "\n```") {
-				startTag := "```calc\n"
-				if !strings.Contains(bufStr, startTag) {
-					startTag = "```math\n"
+			piece := e.Tokenizer.Decode([]int{next})
+			if onToken != nil {
+				continueGen := onToken(piece)
+				if !continueGen {
+					break
 				}
-				sIdx := strings.Index(bufStr, startTag) + len(startTag)
-				eIdx := len(bufStr) - len("\n```")
-				if eIdx > sIdx {
-					expr := strings.TrimSpace(bufStr[sIdx:eIdx])
-					if val, err := reasoning.ExecuteMathTool(expr); err == nil {
-						inject := fmt.Sprintf("\n--> result: %s\n```\n", val)
-						if onToken != nil {
-							onToken(inject)
-						}
-						injectTokens := e.Tokenizer.Encode(inject, false)
-						for _, it := range injectTokens {
-							logits = e.Forward(it, pos, kv)
-							pos++
-							history = append(history, it)
-						}
-						recentBuffer.Reset()
-						continue
+			}
+
+			history = append(history, next)
+
+			// 3. Inline Calculator Execution if enabled
+			if enableCalc {
+				recentBuffer.WriteString(piece)
+				bufStr := recentBuffer.String()
+
+				// Check for ```calc\n...\n```
+				if (strings.Contains(bufStr, "```calc\n") || strings.Contains(bufStr, "```math\n")) && strings.HasSuffix(bufStr, "\n```") {
+					startTag := "```calc\n"
+					if !strings.Contains(bufStr, startTag) {
+						startTag = "```math\n"
 					}
-				}
-				recentBuffer.Reset()
-			} else if strings.Contains(bufStr, "<<calc:") && strings.HasSuffix(bufStr, ">>") {
-				sIdx := strings.Index(bufStr, "<<calc:") + len("<<calc:")
-				eIdx := len(bufStr) - len(">>")
-				if eIdx > sIdx {
-					expr := strings.TrimSpace(bufStr[sIdx:eIdx])
-					if !strings.Contains(expr, "=") {
+					sIdx := strings.Index(bufStr, startTag) + len(startTag)
+					eIdx := len(bufStr) - len("\n```")
+					if eIdx > sIdx {
+						expr := strings.TrimSpace(bufStr[sIdx:eIdx])
 						if val, err := reasoning.ExecuteMathTool(expr); err == nil {
-							inject := fmt.Sprintf(" = %s>>", val)
+							inject := fmt.Sprintf("\n--> result: %s\n```\n", val)
 							if onToken != nil {
 								onToken(inject)
 							}
@@ -420,13 +602,40 @@ func (e *Engine) GenerateWithTools(prompt string, maxTokens int, params sampler.
 							continue
 						}
 					}
+					recentBuffer.Reset()
+				} else if strings.Contains(bufStr, "<<calc:") && strings.HasSuffix(bufStr, ">>") {
+					sIdx := strings.Index(bufStr, "<<calc:") + len("<<calc:")
+					eIdx := len(bufStr) - len(">>")
+					if eIdx > sIdx {
+						expr := strings.TrimSpace(bufStr[sIdx:eIdx])
+						if !strings.Contains(expr, "=") {
+							if val, err := reasoning.ExecuteMathTool(expr); err == nil {
+								inject := fmt.Sprintf(" = %s>>", val)
+								if onToken != nil {
+									onToken(inject)
+								}
+								injectTokens := e.Tokenizer.Encode(inject, false)
+								for _, it := range injectTokens {
+									logits = e.Forward(it, pos, kv)
+									pos++
+									history = append(history, it)
+								}
+								recentBuffer.Reset()
+								continue
+							}
+						}
+					}
+					recentBuffer.Reset()
 				}
-				recentBuffer.Reset()
 			}
-		}
 
-		logits = e.Forward(next, pos, kv)
-		pos++
+			if isGreedy {
+				next = e.ForwardSample(next, pos, kv)
+			} else {
+				logits = e.Forward(next, pos, kv)
+			}
+			pos++
+		}
 	}
 	genDur := time.Since(startGen)
 
@@ -496,8 +705,9 @@ func (e *Engine) GenerateConsensusWithStream(prompt string, numSamples int, maxT
 
 	var baseLogits []float32
 	if pos < len(tokens) {
-		if !metal.IsAvailable() && pos == 0 && len(tokens) > 1 {
-			baseLogits = e.ForwardBatch(tokens, baseKV)
+		remTokens := tokens[pos:]
+		if len(remTokens) > 1 {
+			baseLogits = e.ForwardBatchAt(remTokens, pos, baseKV)
 			pos = len(tokens)
 		} else {
 			for pos < len(tokens) {

@@ -63,6 +63,9 @@ func TestEvaluateMath(t *testing.T) {
 		{"(-2)!", 0, "", true},
 		{"(1 + 2", 0, "", true},
 		{"unknown_func(5)", 0, "", true},
+
+		// Security limits: deep nesting
+		{"((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))", 0, "", true},
 	}
 
 	for _, tt := range tests {
@@ -80,5 +83,23 @@ func TestEvaluateMath(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCalculatorSecurityLimits(t *testing.T) {
+	// 1. Oversized expression
+	hugeExpr := make([]byte, 3000)
+	for i := range hugeExpr {
+		hugeExpr[i] = '1'
+	}
+	_, _, err := EvaluateMath(string(hugeExpr))
+	if err == nil {
+		t.Fatalf("expected error on oversized expression (>2048 runes)")
+	}
+
+	// 2. Extreme power overflow
+	_, _, err = EvaluateMath("10 ^ 1000")
+	if err == nil {
+		t.Fatalf("expected error on extreme power overflow")
 	}
 }

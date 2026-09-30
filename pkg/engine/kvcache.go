@@ -1,6 +1,9 @@
 package engine
 
-import "go-inference/pkg/quant"
+import (
+	"go-inference/pkg/metal"
+	"go-inference/pkg/quant"
+)
 
 // KVCacheType defines the storage precision for key and value vectors.
 type KVCacheType string
@@ -10,6 +13,50 @@ const (
 	KVTypeQ8_0 KVCacheType = "q8_0"
 	KVTypeQ4_0 KVCacheType = "q4_0"
 )
+
+// SSMCache holds recurrent convolution states and state-space matrices for hybrid models.
+type SSMCache struct {
+	ConvState [][]float32 // [numLayers][(convKernel - 1) * ssmChannels]
+	SSMState  [][]float32 // [numLayers][ssmInnerSize * ssmStateSize]
+}
+
+// Clone returns an independent deep copy of SSMCache.
+func (s *SSMCache) Clone() *SSMCache {
+	if s == nil {
+		return nil
+	}
+	clone := &SSMCache{
+		ConvState: make([][]float32, len(s.ConvState)),
+		SSMState:  make([][]float32, len(s.SSMState)),
+	}
+	for i := range s.ConvState {
+		clone.ConvState[i] = make([]float32, len(s.ConvState[i]))
+		copy(clone.ConvState[i], s.ConvState[i])
+	}
+	for i := range s.SSMState {
+		clone.SSMState[i] = make([]float32, len(s.SSMState[i]))
+		copy(clone.SSMState[i], s.SSMState[i])
+	}
+	return clone
+}
+
+// Reset clears the recurrent SSM states.
+func (s *SSMCache) Reset() {
+	if s == nil {
+		return
+	}
+	for i := range s.ConvState {
+		for j := range s.ConvState[i] {
+			s.ConvState[i][j] = 0
+		}
+	}
+	for i := range s.SSMState {
+		for j := range s.SSMState[i] {
+			s.SSMState[i][j] = 0
+		}
+	}
+	metal.ResetSSMState()
+}
 
 // KVCache holds the key and value states for all layers across sequence positions.
 type KVCache struct {
@@ -23,6 +70,7 @@ type KVCache struct {
 	MaxSeq   int
 	KVDim    int
 	CurPos   int
+	SSM      *SSMCache
 }
 
 // NewKVCache allocates key and value buffers for layers up to maxSeq tokens with default F32 precision.
@@ -68,9 +116,30 @@ func NewQuantizedKVCache(numLayers, maxSeq, kvDim int, kvType KVCacheType) *KVCa
 	return cache
 }
 
-// Reset clears the sequence position count.
+// InitSSM allocates recurrent convolution and state-space matrices for all layers.
+func (c *KVCache) InitSSM(numLayers, convKernel, ssmChannels, ssmInner, ssmState int) {
+	if convKernel <= 0 {
+		convKernel = 4
+	}
+	histLen := convKernel - 1
+	c.SSM = &SSMCache{
+		ConvState: make([][]float32, numLayers),
+		SSMState:  make([][]float32, numLayers),
+	}
+	convLen := histLen * ssmChannels
+	stateLen := ssmInner * ssmState
+	for l := 0; l < numLayers; l++ {
+		c.SSM.ConvState[l] = make([]float32, convLen)
+		c.SSM.SSMState[l] = make([]float32, stateLen)
+	}
+}
+
+// Reset clears the sequence position count and recurrent SSM states.
 func (c *KVCache) Reset() {
 	c.CurPos = 0
+	if c.SSM != nil {
+		c.SSM.Reset()
+	}
 }
 
 // Write copies a key and value vector into the specified layer and slot.
@@ -205,6 +274,10 @@ func (c *KVCache) ForkAt(maxSlot int) *KVCache {
 			copy(clone.Key[l][:copyLen], c.Key[l][:copyLen])
 			copy(clone.Value[l][:copyLen], c.Value[l][:copyLen])
 		}
+	}
+
+	if c.SSM != nil {
+		clone.SSM = c.SSM.Clone()
 	}
 
 	return clone

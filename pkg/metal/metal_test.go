@@ -188,6 +188,67 @@ func TestMetalRMSNorm(t *testing.T) {
 	}
 }
 
+func TestMetalRMSNormBatch(t *testing.T) {
+	if err := Init(); err != nil {
+		t.Skip("Metal not available")
+	}
+
+	dim := 128
+	batchSize := 8
+	x := make([]float32, batchSize*dim)
+	weight := make([]float32, dim)
+	for i := range x {
+		x[i] = 2.0
+	}
+	for i := range weight {
+		weight[i] = 1.0
+	}
+
+	out := make([]float32, batchSize*dim)
+	if err := RMSNormBatch(out, x, weight, dim, 1e-5, batchSize); err != nil {
+		t.Fatalf("Metal RMSNormBatch failed: %v", err)
+	}
+
+	for i := 0; i < batchSize*dim; i++ {
+		if math.Abs(float64(out[i]-1.0)) > 1e-3 {
+			t.Errorf("RMSNormBatch mismatch at %d: got %f, expected 1.0", i, out[i])
+		}
+	}
+}
+
+func TestMetalResidualRMSNormBatch(t *testing.T) {
+	if err := Init(); err != nil {
+		t.Skip("Metal not available")
+	}
+
+	dim := 128
+	batchSize := 8
+	x := make([]float32, batchSize*dim)
+	proj := make([]float32, batchSize*dim)
+	weight := make([]float32, dim)
+	for i := range x {
+		x[i] = 1.0
+		proj[i] = 1.0
+	}
+	for i := range weight {
+		weight[i] = 1.0
+	}
+
+	outNorm := make([]float32, batchSize*dim)
+	if err := ResidualRMSNormBatch(x, proj, outNorm, weight, dim, 1e-5, batchSize); err != nil {
+		t.Fatalf("Metal ResidualRMSNormBatch failed: %v", err)
+	}
+
+	for i := 0; i < batchSize*dim; i++ {
+		if math.Abs(float64(x[i]-2.0)) > 1e-3 {
+			t.Errorf("Residual mismatch at %d: got %f, expected 2.0", i, x[i])
+		}
+		if math.Abs(float64(outNorm[i]-1.0)) > 1e-3 {
+			t.Errorf("ResidualRMSNormBatch mismatch at %d: got %f, expected 1.0", i, outNorm[i])
+		}
+	}
+}
+
 func BenchmarkMetalGEMV_Q4_K(b *testing.B) {
 	if err := Init(); err != nil {
 		b.Skip("Metal not available")

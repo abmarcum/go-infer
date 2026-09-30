@@ -270,6 +270,11 @@
       <label>System Prompt</label>
       <textarea id="sys-prompt" rows="3" placeholder="You are a helpful and concise AI assistant..."></textarea>
     </div>
+
+    <div class="control-group">
+      <label>API Key</label>
+      <input type="password" id="api-key-input" placeholder="Bearer token (optional)">
+    </div>
   </aside>
 
   <main>
@@ -308,6 +313,14 @@
 
     let conversation = [];
 
+    const apiKeyInput = document.getElementById('api-key-input');
+    if (localStorage.getItem('go_infer_api_key')) {
+      apiKeyInput.value = localStorage.getItem('go_infer_api_key');
+    }
+    apiKeyInput.onchange = () => {
+      localStorage.setItem('go_infer_api_key', apiKeyInput.value.trim());
+    };
+
     // Fetch health and model name
     fetch('/health')
       .then(r => r.json())
@@ -345,10 +358,16 @@
         max_tokens: parseInt(maxtokSlider.value)
       };
 
+      const headers = { 'Content-Type': 'application/json' };
+      const currentKey = apiKeyInput.value.trim();
+      if (currentKey) {
+        headers['Authorization'] = 'Bearer ' + currentKey;
+      }
+
       try {
         const res = await fetch('/v1/chat/completions', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: headers,
           body: JSON.stringify(payload)
         });
 

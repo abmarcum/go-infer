@@ -149,14 +149,24 @@ func (l *Lexer) NextToken() (Token, error) {
 	}
 }
 
+// Safety limits to prevent stack overflow and CPU exhaustion DoS attacks
+const (
+	MaxExprLength     = 2048
+	MaxRecursionDepth = 64
+)
+
 // Parser performs recursive descent parsing of mathematical expressions.
 type Parser struct {
 	lexer *Lexer
 	cur   Token
+	depth int
 }
 
-// NewParser creates a math parser.
+// NewParser creates a math parser with length and depth validation.
 func NewParser(input string) (*Parser, error) {
+	if len(input) > MaxExprLength {
+		return nil, fmt.Errorf("expression length (%d) exceeds safety limit of %d characters", len(input), MaxExprLength)
+	}
 	p := &Parser{lexer: NewLexer(input)}
 	var err error
 	p.cur, err = p.lexer.NextToken()
@@ -189,6 +199,12 @@ func (p *Parser) Parse() (float64, error) {
 
 // parseExpr handles addition and subtraction: + -
 func (p *Parser) parseExpr() (float64, error) {
+	p.depth++
+	defer func() { p.depth-- }()
+	if p.depth > MaxRecursionDepth {
+		return 0, fmt.Errorf("recursion depth limit exceeded (%d): expression too deeply nested", MaxRecursionDepth)
+	}
+
 	val, err := p.parseTerm()
 	if err != nil {
 		return 0, err
@@ -262,6 +278,9 @@ func (p *Parser) parsePower() (float64, error) {
 			return 0, err
 		}
 		val = math.Pow(val, right)
+		if math.IsInf(val, 0) || math.IsNaN(val) {
+			return 0, fmt.Errorf("numeric overflow or invalid exponentiation")
+		}
 	}
 	return val, nil
 }
